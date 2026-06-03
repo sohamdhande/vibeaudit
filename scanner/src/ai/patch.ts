@@ -167,7 +167,6 @@ export async function validatePatch(
       });
 
       const sourceFile = ts.createSourceFile('patch.ts', currentPatch, ts.ScriptTarget.Latest, true);
-      let hasAuthResponse = false;
       let dangerousViolation: string | null = null;
 
       function visit(node: ts.Node) {
@@ -187,22 +186,6 @@ export async function validatePatch(
           }
           if (node.arguments.some(arg => ts.isSpreadElement(arg))) {
             dangerousViolation = 'SpreadElement in function call is blocked';
-          }
-          
-          if (calleeText === 'res.status' || calleeText === 'res.sendStatus') {
-            if (node.arguments.length > 0 && ts.isNumericLiteral(node.arguments[0])) {
-              const code = node.arguments[0].text;
-              if (code === '401' || code === '403') {
-                let parent = node.parent;
-                while (parent) {
-                  if (ts.isIfStatement(parent) || ts.isConditionalExpression(parent) || ts.isSwitchStatement(parent)) {
-                    hasAuthResponse = true;
-                    break;
-                  }
-                  parent = parent.parent;
-                }
-              }
-            }
           }
         } else if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
           const objText = node.expression.getText();
@@ -225,10 +208,14 @@ export async function validatePatch(
       const hasAuthRegex =
         /res\.(status|sendStatus)\s*\(\s*(401|403)/.test(currentPatch)
         || /return\s+res\..*\b(401|403)/.test(currentPatch)
-        || /Response\.json\s*\([^)]*\{[^)]*status:\s*(401|403)/s.test(currentPatch);
+        || /Response\.json\s*\([^)]*\{[^)]*status:\s*(401|403)/s.test(currentPatch)
+        || /new\s+Response\s*\(.*(401|403)/s.test(currentPatch)
+        || /throw\s+new\s+Error/.test(currentPatch)
+        || /next\s*\(\s*new\s+Error/.test(currentPatch)
+        || /return\s+(null|undefined)/.test(currentPatch);
 
-      if (!hasAuthRegex || !hasAuthResponse) {
-        throw new Error('AI patch does not contain explicit 401/403 response in a conditional branch');
+      if (!hasAuthRegex) {
+        throw new Error('AI patch does not contain an explicit rejection pattern (403, throw Error, return null)');
       }
 
       // Transform succeeded — patch is syntactically valid

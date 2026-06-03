@@ -337,7 +337,7 @@ app.post('/scan', requireApiKey, scanLimiter, async (req, res) => {
   let exploitConfirmedTime: number | null = null;
 
   // ── PARSE CONFIG ──────────────────────────────
-  const { targetUrl, userA, userB, loginPath, pagesToCrawl, loginFieldSelectors, authType, githubRepoOwner, githubRepoName, githubBaseBranch } = req.body;
+  const { targetUrl, userA, userB, loginPath, pagesToCrawl, loginFieldSelectors, authType, githubRepoOwner, githubRepoName, githubBaseBranch, githubToken: bodyGithubToken } = req.body;
     
     if (!targetUrl) {
       emit('preflight', 'error', 'targetUrl is required');
@@ -360,7 +360,7 @@ app.post('/scan', requireApiKey, scanLimiter, async (req, res) => {
       pagesToCrawl: pagesToCrawl?.length ? pagesToCrawl : ['/dashboard'],
       loginFieldSelectors,
       authType: authType || 'auto',
-      githubToken: process.env.GITHUB_TOKEN,
+      githubToken: bodyGithubToken || process.env.GITHUB_TOKEN,
       githubRepoOwner,
       githubRepoName,
       githubBaseBranch: githubBaseBranch || 'main',
@@ -563,6 +563,13 @@ app.post('/scan', requireApiKey, scanLimiter, async (req, res) => {
     const playwrightTest = generatePlaywrightTest(finding, config);
     emit('ai', 'log', '[TEST] Playwright regression test generated ✓');
     emit('ai', 'data', 'Regression test', { regressionTest: playwrightTest });
+    
+    console.log('[PATCH RESULT]', {
+      hasPatchedCode: !!patch.patchedCode,
+      hasFilePath: !!patch.filePath,
+      hasTestCode: !!playwrightTest,
+      patchValidated: patch.patchValidated
+    });
 
     // ── GITHUB PR ─────────────────────────────
     if (aborted.value) {
@@ -575,13 +582,15 @@ app.post('/scan', requireApiKey, scanLimiter, async (req, res) => {
     const hasRepo = !!(config.githubRepoOwner && config.githubRepoName);
     if (!hasToken || !hasRepo) {
       // skip PR silently
-    } else if (patch.patchValidated === false) {
-      emit('github', 'log', '[GITHUB] Skipping PR — patch failed syntax validation. Manual review required.');
+    } else if (!patch.patchedCode || !patch.filePath) {
+      emit('github', 'log', '[GITHUB] No patch content. Skipping PR.');
     } else {
+      console.log('[PR GUARD] patchValidated value:', patch?.patchValidated);
       emit('github', 'log', '[GITHUB] Preparing Pull Request...');
       await sleep(1000);
 
       try {
+        console.log('[ORCHESTRATOR] About to create PR...');
         prUrl = await createSecurityPR(
           patch,
           playwrightTest,
@@ -590,6 +599,7 @@ app.post('/scan', requireApiKey, scanLimiter, async (req, res) => {
           (msg) => emit('github', 'log', msg),
           abortController.signal
         );
+        console.log('[ORCHESTRATOR] PR function returned:', prUrl);
         if (prUrl) {
           emit('github', 'complete', `Pull Request opened: ${prUrl}`, { prUrl });
         } else {

@@ -43,6 +43,8 @@ export async function createSecurityPR(
   emit: (msg: string) => void,
   signal?: AbortSignal
 ): Promise<string> {
+  console.log('[PR] Function called with:', { owner: config.githubRepoOwner, repo: config.githubRepoName, branch: config.githubBaseBranch, hasToken: !!config.githubToken });
+  try {
   if (signal?.aborted) throw new Error('Scan aborted');
   if (!config.githubRepoOwner || !config.githubRepoName) {
     emit('ℹ️ No GitHub repo provided — skipping PR generation. Add GitHub repo details in Advanced Settings to enable.');
@@ -77,6 +79,7 @@ export async function createSecurityPR(
   // Always log the exact owner/repo being used so mismatches are visible
   emit(`[GITHUB] Connecting to ${owner}/${repo} (base: ${base})...`);
 
+  console.log('[PR] Getting base branch SHA...');
   // ── Get base branch SHA ─────────────────────────────────────────
   let sha: string;
   try {
@@ -104,6 +107,7 @@ export async function createSecurityPR(
   };
 
   // ── Create branch (reuse open PRs, avoid closed PR branch collisions) ───────
+  console.log('[PR] Creating/updating branch...');
   emit('[GITHUB] Creating security branch...');
   let branchExists = false;
   try {
@@ -185,6 +189,7 @@ export async function createSecurityPR(
   let patchCommitted = false;
   const targetPatchPath = resolvedPatchPath || `vibeaudit-patch-${hash}.ts`;
 
+  console.log('[PR] Committing files...');
   try {
     emit('[GITHUB] Committing patch...');
     await octokit.repos.createOrUpdateFileContents({
@@ -216,6 +221,7 @@ export async function createSecurityPR(
     emit(`[GITHUB] Warning: regression test commit failed (${formatOctokitError(err)}) — continuing to PR.`);
   }
 
+  console.log('[PR] Opening PR...');
   emit('[GITHUB] Opening Pull Request...');
 
   // Build dynamic PR body
@@ -261,6 +267,7 @@ This test will fail if the ownership check is ever removed.
         body: prBody,
       });
       emit(`[GITHUB] Pull Request updated: ${pr.html_url}`);
+      console.log('[PR] PR updated/created successfully:', pr.html_url);
       return pr.html_url;
     } catch (err: unknown) {
       throw new Error(`[GITHUB] Failed to update existing Pull Request: ${formatOctokitError(err)}`);
@@ -278,8 +285,14 @@ This test will fail if the ownership check is ever removed.
     });
 
     emit(`[GITHUB] Pull Request created: ${pr.html_url}`);
+    console.log('[PR] PR created successfully:', pr.html_url);
     return pr.html_url;
   } catch (err: unknown) {
     throw new Error(`[GITHUB] Failed to create Pull Request: ${formatOctokitError(err)}`);
+  }
+  } catch (error: any) {
+    console.error('[PR] FAILED:', error.message);
+    console.error('[PR] Full error:', error);
+    throw error;
   }
 }

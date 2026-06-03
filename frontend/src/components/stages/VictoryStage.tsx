@@ -65,7 +65,7 @@ export function VictoryStage({ events, isClean }: VictoryStageProps) {
     const patch: PatchResult = {
       originalCode: '',
       patchedCode: (pp.patchedCode as string) || '',
-      displayPatch: (pp.patch as string) || (pp.code as string) || '',
+      displayPatch: (pp.displayPatch as string) || (pp.patchedCode as string) || (pp.patch as string) || '',
       filePath: (pp.filePath as string) || 'unknown',
       ownershipField: (pp.ownershipField as string) || 'userId',
       authLibrary: (pp.authLibrary as string) || 'unknown',

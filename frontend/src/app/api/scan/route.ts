@@ -5,7 +5,6 @@ const SCANNER_URL = process.env.SCANNER_URL || process.env.NEXT_PUBLIC_SCANNER_U
 export async function POST(req: NextRequest) {
   try {
     const jsonBody = await req.json().catch(() => ({}));
-    delete jsonBody.githubToken;
     const body = JSON.stringify(jsonBody);
     const apiKey = process.env.SCANNER_API_KEY || '';
 

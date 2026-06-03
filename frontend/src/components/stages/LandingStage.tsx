@@ -70,6 +70,7 @@ export function LandingStage({ onStart, error }: LandingStageProps) {
   const [githubRepoOwner, setGithubRepoOwner] = useState('');
   const [githubRepoName, setGithubRepoName] = useState('');
   const [githubBaseBranch, setGithubBaseBranch] = useState('main');
+  const [githubToken, setGithubToken] = useState('');
 
   const loadShopVulnDemo = () => {
     setUrl('https://shopvuln.vercel.app');
@@ -83,6 +84,7 @@ export function LandingStage({ onStart, error }: LandingStageProps) {
     setGithubRepoOwner('sohamd1567');
     setGithubRepoName('shopvuln');
     setGithubBaseBranch('main');
+    setGithubToken('');
     setShowAdvanced(true);
   };
 
@@ -134,6 +136,7 @@ export function LandingStage({ onStart, error }: LandingStageProps) {
       ...(githubRepoOwner ? { githubRepoOwner } : {}),
       ...(githubRepoName ? { githubRepoName } : {}),
       ...(githubBaseBranch ? { githubBaseBranch } : {}),
+      ...(githubToken ? { githubToken } : {}),
       ...(Object.keys(selectors).length > 0 ? { loginFieldSelectors: selectors } : {})
     };
     
@@ -343,6 +346,18 @@ export function LandingStage({ onStart, error }: LandingStageProps) {
                       placeholder="your-repository-name"
                     />
                   </div>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-[10px] font-mono text-white/40 uppercase tracking-wider">GitHub Token <span className="text-white/20 normal-case tracking-normal">(optional)</span></label>
+                  <p className="text-[10px] text-white/30 font-mono mb-2">Required for automatic PR generation</p>
+                  <input
+                    type="password"
+                    value={githubToken}
+                    onChange={(e) => setGithubToken(e.target.value)}
+                    className="w-full bg-black/50 border border-white/10 rounded-md py-2 px-3 text-white font-mono text-xs focus:outline-none focus:border-brand-green/50 focus:ring-1 focus:ring-brand-green/50 transition-all"
+                    placeholder="ghp_xxxxxxxxxxxx"
+                  />
                 </div>
 
                 <div className="space-y-2">

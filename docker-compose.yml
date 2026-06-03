@@ -12,6 +12,7 @@ services:
     environment:
       - PORT=4000
       - FRONTEND_ORIGIN=http://localhost:3000
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
     networks:
       - vibeaudit
 
