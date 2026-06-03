@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment
+.env
+.env.local
+
+# Debug screenshots from crawler
+debug-*.png
+failure-*.png
+screenshots/
+
+# OS files
+.DS_Store
+*.js
+test-*.js

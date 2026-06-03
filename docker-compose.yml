@@ -1,0 +1,38 @@
+version: "3.9"
+
+services:
+  scanner:
+    build:
+      context: ./scanner
+      dockerfile: Dockerfile
+    ports:
+      - "4000:4000"
+    env_file:
+      - ./scanner/.env
+    environment:
+      - PORT=4000
+      - FRONTEND_ORIGIN=http://localhost:3000
+    networks:
+      - vibeaudit
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./frontend/.env
+    environment:
+      - SCANNER_URL=http://scanner:4000
+      - NEXT_PUBLIC_SCANNER_URL=http://scanner:4000
+      - NEXT_PUBLIC_SCANNER_ORIGIN=http://scanner:4000
+    networks:
+      - vibeaudit
+    depends_on:
+      - scanner
+
+
+networks:
+  vibeaudit:
+    driver: bridge

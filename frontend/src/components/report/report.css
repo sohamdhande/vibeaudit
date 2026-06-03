@@ -1,0 +1,375 @@
+/* VibeAudit PDF Report — Print Stylesheet */
+
+@media print {
+  html, body {
+    background: #ffffff !important;
+    color: #111111 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  /* Hide everything on the page except the report portal */
+  body > *:not(#vibeaudit-report-root) { display: none !important; }
+
+  #vibeaudit-report-root {
+    display: block !important;
+    background: #ffffff !important;
+  }
+
+  #vibeaudit-report {
+    display: block !important;
+    background: #ffffff !important;
+    color: #111111 !important;
+  }
+
+  /* Page setup */
+  @page {
+    size: A4;
+    margin: 0;
+  }
+
+  /* Force all colors to survive PDF export */
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    box-sizing: border-box;
+    max-width: 100%;
+  }
+
+  /* Each section is one page — break AFTER it, not before */
+  .report-page {
+    background: #ffffff !important;
+    color: #111111 !important;
+    width: 100%;
+    padding: 16mm 16mm 20mm 16mm;
+    box-sizing: border-box;
+    /* Three-way belt-and-suspenders page break */
+    break-after: page;
+    -webkit-column-break-after: page;
+    page-break-after: always;
+    /* Prevent extra blank page caused by internal overflow */
+    overflow: hidden;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+  }
+
+  .report-page:last-child {
+    break-after: avoid !important;
+    -webkit-column-break-after: avoid !important;
+    page-break-after: avoid !important;
+  }
+
+  /* BUG 5: Prevent text overflow on right edge */
+  pre, code {
+    white-space: pre-wrap !important;
+    word-break: break-all;
+    overflow: hidden;
+  }
+
+  table {
+    table-layout: fixed;
+    width: 100%;
+  }
+
+  td, th {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    word-break: break-word;
+  }
+}
+
+/* Screen: hide report until print */
+@media screen {
+  #vibeaudit-report-root { display: none !important; }
+}
+
+/* ===== SHARED REPORT TYPOGRAPHY ===== */
+.report-page {
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  color: #111111;
+  background: #ffffff;
+  line-height: 1.6;
+}
+
+.report-page h2.report-section-heading {
+  font-size: 20px;
+  font-weight: 500;
+  color: #111111;
+  border-bottom: 1px solid #e0e0e0;
+  padding-bottom: 8px;
+  margin-bottom: 20px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.report-page h3.report-sub-heading {
+  font-size: 15px;
+  font-weight: 500;
+  color: #333333;
+  margin-bottom: 10px;
+}
+
+.report-page p {
+  font-size: 13px;
+  color: #333333;
+  margin-bottom: 12px;
+}
+
+.report-page .report-caption {
+  font-size: 11px;
+  color: #555555;
+}
+
+.report-page .report-mono {
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 12px;
+}
+
+/* Metric cards row */
+.report-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin: 20px 0;
+}
+
+.report-metric-card {
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 12px;
+  text-align: center;
+  min-width: 120px;
+  overflow: hidden;
+}
+
+.report-metric-card .metric-label {
+  font-size: 10px;
+  color: #555555;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 6px;
+}
+
+.report-metric-card .metric-value {
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Severity bar */
+.report-severity-bar {
+  height: 8px;
+  background: #e5e7eb;
+  border-radius: 4px;
+  overflow: hidden;
+  margin-top: 6px;
+}
+
+.report-severity-fill {
+  height: 100%;
+  border-radius: 4px;
+  background: #c0392b;
+}
+
+/* Data table */
+.report-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 16px 0;
+  font-size: 13px;
+}
+
+.report-table th {
+  text-align: left;
+  font-weight: 500;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #555555;
+  border-bottom: 2px solid #e0e0e0;
+  padding: 8px 12px;
+}
+
+.report-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid #f0f0f0;
+  color: #333333;
+}
+
+.report-table tr:last-child td {
+  border-bottom: none;
+}
+
+.report-table tbody tr:nth-child(even) {
+  background: #fafafa;
+}
+
+/* Code block */
+.report-code-block {
+  background: #f8f9fa;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 16px;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* Diff viewer for print */
+.report-diff-container {
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  overflow: hidden;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.report-diff-header {
+  background: #f3f4f6;
+  padding: 8px 16px;
+  border-bottom: 1px solid #d1d5db;
+  font-size: 13px;
+  color: #374151;
+  font-weight: 500;
+}
+
+.report-diff-line {
+  display: flex;
+  min-height: 22px;
+}
+
+.report-diff-line-number {
+  width: 48px;
+  text-align: right;
+  padding: 0 8px;
+  color: #9ca3af;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.report-diff-gutter {
+  width: 24px;
+  text-align: center;
+  flex-shrink: 0;
+  user-select: none;
+  font-weight: 600;
+}
+
+.report-diff-code {
+  flex: 1;
+  padding: 0 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* Diff line types */
+.report-diff-added {
+  background: #e6ffed !important;
+}
+
+.report-diff-added .report-diff-gutter {
+  color: #22863a;
+}
+
+.report-diff-added .report-diff-code {
+  color: #22863a;
+}
+
+.report-diff-removed {
+  background: #ffeef0 !important;
+}
+
+.report-diff-removed .report-diff-gutter {
+  color: #b31d28;
+}
+
+.report-diff-removed .report-diff-code {
+  color: #b31d28;
+}
+
+.report-diff-hunk {
+  background: #dbedff !important;
+}
+
+.report-diff-hunk .report-diff-code {
+  color: #0366d6;
+  font-style: italic;
+}
+
+.report-diff-context {
+  background: #ffffff;
+}
+
+.report-diff-context .report-diff-code {
+  color: #555555;
+}
+
+/* Checklist */
+.report-checklist {
+  list-style: none;
+  padding: 0;
+  margin: 16px 0;
+}
+
+.report-checklist li {
+  padding: 10px 0;
+  border-bottom: 1px solid #f0f0f0;
+  font-size: 13px;
+  color: #333333;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.report-checklist li:last-child {
+  border-bottom: none;
+}
+
+.report-checkbox {
+  font-size: 16px;
+  line-height: 1;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+/* Key-value metadata table */
+.report-kv-table {
+  width: 100%;
+  font-size: 13px;
+}
+
+.report-kv-table tr {
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.report-kv-table td {
+  padding: 10px 0;
+  vertical-align: top;
+}
+
+.report-kv-table td:first-child {
+  width: 200px;
+  font-weight: 500;
+  color: #555555;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.report-kv-table td:last-child {
+  color: #111111;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+/* Syntax highlights for regression test */
+.syn-keyword { font-weight: 700; color: #111111; }
+.syn-string { color: #22863a; }
+.syn-comment { color: #6a737d; font-style: italic; }
