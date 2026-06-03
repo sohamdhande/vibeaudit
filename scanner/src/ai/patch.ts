@@ -286,7 +286,7 @@ export async function validatePatch(
             emit('[PATCH] Self-correction returned empty output.');
           }
         } catch (groqErr: unknown) {
-          emit(`[PATCH] Self-correction Groq call failed: ${groqErr instanceof Error ? groqErr.message : String(groqErr)}`);
+          emit(`[PATCH] Self-correction AI call failed: ${groqErr instanceof Error ? groqErr.message : String(groqErr)}`);
         }
       }
     }
@@ -391,7 +391,7 @@ export async function generatePatch(
 
   // TIER 1 — GitHub Source + Groq AI
   if (githubCode && !manualReviewRequired && groqKey && groqKey.length > 10) {
-    emit('[AI] Calling Groq API (llama-3.3-70b-versatile) with source context...');
+    emit('[AI] Calling AI engine with source context...');
     try {
       const response = await groqWithRetry({
         model: 'llama-3.3-70b-versatile',
@@ -424,12 +424,12 @@ Return the complete fixed file with the correct ownership check returning a 403 
       if (aiOutput.includes(ownershipField) && aiOutput.includes('403') && aiOutput.length > 200) {
         patchedCode = aiOutput.replace(/^```(?:typescript|ts)?\n?/gm, '').replace(/```$/gm, '').trim();
         patchSource = 'github_ai';
-        emit('[AI] Groq patch generated from source context and validated ✓');
+        emit('[AI] AI patch generated from source context and validated ✓');
       } else {
-        emit('[AI] Groq output did not pass validation, falling back...');
+        emit('[AI] AI engine output did not pass validation, falling back...');
       }
     } catch (err: unknown) {
-      emit(`[AI] Groq API error: ${err instanceof Error ? err.message : String(err)}. Falling back...`);
+      emit(`[AI] AI engine error: ${err instanceof Error ? err.message : String(err)}. Falling back...`);
     }
   }
 
@@ -465,12 +465,12 @@ Generate a generic ownership validation middleware or route guard in TypeScript/
       if (aiOutput.length > 50) {
         patchedCode = aiOutput.replace(/^```(?:typescript|ts)?\n?/gm, '').replace(/```$/gm, '').trim();
         patchSource = 'response_ai';
-        emit('[AI] Groq patch generated from response analysis ✓');
+        emit('[AI] AI patch generated from response analysis ✓');
       } else {
-        emit('[AI] Groq output invalid, falling back to template...');
+        emit('[AI] AI engine output invalid, falling back to template...');
       }
     } catch (err: unknown) {
-      emit(`[AI] Groq API error: ${err instanceof Error ? err.message : String(err)}. Falling back to template...`);
+      emit(`[AI] AI engine error: ${err instanceof Error ? err.message : String(err)}. Falling back to template...`);
     }
   }
 
@@ -593,7 +593,7 @@ export async function analyzeVulnerability(
 ): Promise<VulnerabilityAnalysis> {
   const groqKey = process.env.GROQ_API_KEY;
   if (!groqKey || groqKey.length < 10) {
-    console.log('[CVSS] No Groq API key — returning default analysis');
+    console.log('[CVSS] No AI API key — returning default analysis');
     return DEFAULT_ANALYSIS;
   }
 
@@ -692,7 +692,7 @@ Return ONLY the JSON object.`;
     };
   } catch (err: unknown) {
     const errorMessage = err instanceof Error ? err.message : String(err);
-    console.error(`[CVSS] Groq analysis failed: ${errorMessage}`);
+    console.error(`[CVSS] AI analysis failed: ${errorMessage}`);
     return DEFAULT_ANALYSIS;
   }
 }
