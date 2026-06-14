@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { motion, AnimatePresence, Variants } from 'framer-motion';
-import { SSEEvent, BOLAFinding, PatchResult } from '@/types';
+import { SSEEvent, BOLAFinding, PatchResult, ScanSummary } from '@/types';
 import type { ReportData, ScanMeta } from '@/types';
 import { CheckCircle, ExternalLink, GitPullRequest } from 'lucide-react';
 import { VibeAuditLogo } from '../VibeAuditLogo';
@@ -8,93 +8,55 @@ import { GlassCard } from '../ui/GlassCard';
 import { TerminalWindow } from '../ui/TerminalWindow';
 import { TerminalLineData } from '../ui/TerminalLine';
 import { ReportGenerator } from '../report/ReportGenerator';
+import { ScanScoreboard } from './ScanScoreboard';
 
-interface VictoryStageProps {
-  events: SSEEvent[];
-  isClean?: boolean;
-}
+interface VictoryStageProps { events: SSEEvent[]; isClean?: boolean; summary?: ScanSummary | null; }
 
 type RevealState = 'VERIFYING' | 'RESOLVED' | 'CARDS_REVEAL' | 'BANNER_REVEAL';
 
-export function VictoryStage({ events, isClean }: VictoryStageProps) {
+export function VictoryStage({ events, isClean, summary }: VictoryStageProps) {
   const [state, setState] = useState<RevealState>('VERIFYING');
   const [mountTime] = useState<number>(() => Date.now());
 
   const verifyEvents = events.filter((e) => e.stage === 'verify');
   const doneEvent = events.find(e => (e.stage === 'done' && e.type === 'complete') || (e.stage === 'complete' && e.type === 'clean'));
-  const cleanEvent = events.find(e => e.stage === 'complete' && e.type === 'clean');
-  
-  const githubEvent = events.find(e => e.stage === 'github' && e.type === 'complete');
-  const summaryEvent = events.find(e => e.stage === 'summary' && e.type === 'result');
-  
-  const prUrl = githubEvent?.payload?.prUrl;
 
   // Build ReportData from accumulated SSE events
   const reportData: ReportData | null = useMemo(() => {
-    if (isClean) return null;
-
-    // Extract finding from attack events
-    const findingEvent = events.find(e => e.stage === 'attack' && e.type === 'finding');
-    const patchEvent = events.find(e => e.stage === 'ai' && e.type === 'patch');
-    const testEvent = events.find(e => (e.stage === 'ai' || e.stage === 'github') && (e.payload?.regressionTest || e.payload?.testCode));
-
-    if (!findingEvent?.payload) return null;
-
-    const fp = findingEvent.payload;
-    const finding: BOLAFinding = {
-      endpoint: (fp.endpoint || fp.url || '') as string,
-      method: (fp.method as string) || 'GET',
-      victimToken: '[REDACTED]',
-      attackerToken: '[REDACTED]',
-      victimResourceId: (fp.victimResourceId as string) || '',
-      stolenData: (fp.stolenData as Record<string, unknown>) || {},
-      sensitiveFields: Array.isArray(fp.sensitiveFields)
-        ? fp.sensitiveFields.map((f: unknown) =>
-            typeof f === 'object' && f !== null && 'key' in f
-              ? (f as { key: string; value: unknown; category: 'PII' | 'PHI' | 'FINANCIAL' | 'AUTH' | 'UNKNOWN' })
-              : { key: String(f), value: '[REDACTED]', category: 'UNKNOWN' as const }
-          )
-        : [],
-      attackerAuthenticated: (fp.attackerAuthenticated as boolean) ?? true,
-      curlReproduction: (fp.curlReproduction as string) || '',
-      cvssScore: (fp.cvssScore as number) || 8.5,
-      confidenceScore: (fp.confidenceScore as number) || 0,
-    };
-
-    const pp = patchEvent?.payload || {};
-    const patch: PatchResult = {
-      originalCode: '',
-      patchedCode: (pp.patchedCode as string) || '',
-      displayPatch: (pp.displayPatch as string) || (pp.patchedCode as string) || (pp.patch as string) || '',
-      filePath: (pp.filePath as string) || 'unknown',
-      ownershipField: (pp.ownershipField as string) || 'userId',
-      authLibrary: (pp.authLibrary as string) || 'unknown',
-      sessionAccessor: (pp.sessionAccessor as string) || 'req.user.id',
-      reasoning: Array.isArray(pp.reasoning) ? pp.reasoning as string[] : [],
-      patchSource: (pp.patchSource as 'github_ai' | 'response_ai' | 'deterministic') || 'response_ai',
-    };
-
-    const regressionTest = (testEvent?.payload?.regressionTest as string) || (testEvent?.payload?.testCode as string) || '// No regression test generated';
-
-    const scanMeta: ScanMeta = {
-      scanId: (events[0]?.payload?.scanId as string) || `scan_${mountTime}`,
-      startTime: events[0]?.timestamp || mountTime,
-      endTime: summaryEvent?.timestamp || mountTime,
-      endpointsDiscovered: summaryEvent?.endpointsFound || 0,
-      endpointsTested: summaryEvent?.attacksAttempted || 0,
-      scannerVersion: '1.0.0',
-      aiModel: 'AI-powered analysis',
-      prUrl: (prUrl as string) || null,
-    };
+    if (!summary || !summary.results.finding) return null;
 
     return {
-      scanConfig: { targetUrl: summaryEvent?.targetUrl || 'Unknown', userA: { email: '', password: '' }, userB: { email: '', password: '' } },
-      finding,
-      patch,
-      regressionTest,
-      scanMeta,
+      scanConfig: { targetUrl: summary.meta.targetUrl, userA: { email: '', password: '' }, userB: { email: '', password: '' } },
+      finding: summary.results.finding as BOLAFinding,
+      patch: summary.results.patch as PatchResult,
+      regressionTest: summary.results.regressionTest || '// No regression test generated',
+      scanMeta: {
+        scanId: summary.meta.scanId,
+        startTime: summary.meta.startTime,
+        endTime: summary.meta.endTime,
+        endpointsDiscovered: summary.telemetry.discovery.totalEndpoints,
+        endpointsTested: summary.telemetry.replay.tested,
+        scannerVersion: summary.meta.scannerVersion,
+        aiModel: 'AI-powered analysis',
+        prUrl: summary.results.prUrl,
+        prGenerationAttempted: summary.telemetry.github.attempted,
+        prGenerationSkippedReason: summary.telemetry.github.prSkippedReason,
+        githubRepoOwner: null,
+        githubRepoName: null,
+        patchValidated: summary.telemetry.remediation.validated,
+        patchGenerationAttempted: summary.telemetry.remediation.attempted,
+        patchGenerationSkippedReason: summary.telemetry.remediation.patchSkippedReason,
+        testedEndpoints: undefined,
+        discoveryStats: summary.telemetry.discovery as any,
+        replayStats: summary.telemetry.replay as any,
+        skipReasons: summary.telemetry.replay.skipReasons as any,
+        confirmationStats: summary.telemetry.confirmation as any,
+        rejectionReasons: summary.telemetry.confirmation.rejectionReasons as any,
+        remediationStats: summary.telemetry.remediation as any,
+        githubStats: summary.telemetry.github as any,
+      }
     };
-  }, [events, isClean, prUrl, summaryEvent, mountTime]);
+  }, [summary]);
 
   const lines: TerminalLineData[] = verifyEvents.map((e, idx) => ({
     id: `verify-${idx}-${e.timestamp}`,
@@ -122,6 +84,57 @@ export function VictoryStage({ events, isClean }: VictoryStageProps) {
     }
   }, [doneEvent]);
 
+  const handleExportBenchmark = () => {
+    if (!summary) return;
+    
+    const d = summary.telemetry.discovery;
+    const r = summary.telemetry.replay;
+    const c = summary.telemetry.confirmation;
+    const rem = summary.telemetry.remediation;
+    const gh = summary.telemetry.github;
+
+    const row = {
+      scan_id: summary.meta.scanId || '',
+      target_url: summary.meta.targetUrl || '',
+      duration_seconds: summary.meta.durationMs ? (summary.meta.durationMs / 1000).toFixed(2) : '',
+      pages_visited: d.pagesVisited ?? '',
+      total_endpoints: d.totalEndpoints ?? '',
+      unique_endpoints: d.uniqueEndpoints ?? '',
+      parameterized_endpoints: d.parameterizedEndpoints ?? '',
+      bola_candidates: d.bolaCandidates ?? '',
+      replay_eligible: r.eligible ?? '',
+      replay_tested: r.tested ?? '',
+      replay_skipped: r.skipped ?? '',
+      confirmed_findings: c.confirmed ?? '',
+      rejected_candidates: c.rejected ?? '',
+      patch_generation_attempted: rem.attempted ?? '',
+      patch_generated: rem.generated ?? '',
+      patch_skipped: rem.skipped ?? '',
+      patch_validation_failed: rem.validationFailed ?? '',
+      pr_generation_attempted: gh.attempted ?? '',
+      pr_created: gh.created ?? '',
+      pr_skipped: gh.skipped ?? '',
+      findings_count: summary.results.finding ? 1 : 0,
+      artifact_folder_path: `/artifacts/${summary.meta.scanId}/`
+    };
+
+    const headers = Object.keys(row).join(',');
+    const values = Object.values(row).map(v => {
+      if (v === null || v === undefined || v === '') return '';
+      if (typeof v === 'string') return `"${v.replace(/"/g, '""')}"`;
+      return v;
+    }).join(',');
+    const csvContent = `${headers}\n${values}`;
+    
+    const blob = new Blob([csvContent], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `benchmark_row_${summary.meta.scanId}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   // Framer motion variants for stagger
   const containerVariants: Variants = {
     hidden: { opacity: 0 },
@@ -147,16 +160,33 @@ export function VictoryStage({ events, isClean }: VictoryStageProps) {
         <VibeAuditLogo size="md" animated={false} />
       </div>
 
-      <div className="w-full mb-12">
-        <TerminalWindow 
-          lines={lines} 
-          className="h-[250px]"
-          title="VERIFICATION_SYSTEM"
-          accentColor="green"
-        />
-      </div>
+      {events.find(e => e.stage === 'done' && e.type === 'error') ? (
+        <div className="w-full mb-12">
+          <TerminalWindow 
+            lines={[...lines, { id: 'error', content: events.find(e => e.stage === 'done' && e.type === 'error')!.message, timestamp: Date.now(), type: 'error' }]}
+            className="h-[250px]"
+            title="SYSTEM_ERROR"
+            accentColor="red"
+          />
+          <div className="flex justify-center mt-8">
+            <button onClick={() => window.location.reload()} className="px-6 py-2 bg-red-500/20 text-red-500 border border-red-500/50 rounded font-mono hover:bg-red-500/30 transition-colors">
+              Restart Scanner
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="w-full mb-12">
+          <TerminalWindow 
+            lines={lines} 
+            className="h-[250px]"
+            title="VERIFICATION_SYSTEM"
+            accentColor="green"
+          />
+        </div>
+      )}
 
-      <AnimatePresence>
+      {!events.find(e => e.stage === 'done' && e.type === 'error') && (
+        <AnimatePresence>
         {(state === 'CARDS_REVEAL' || state === 'BANNER_REVEAL') && (
           <motion.div 
             variants={containerVariants}
@@ -164,121 +194,18 @@ export function VictoryStage({ events, isClean }: VictoryStageProps) {
             animate="show"
             className="w-full flex flex-col gap-6"
           >
-            {/* Conditional Cards / Banner based on vulnerabilities */}
-            {!isClean ? (
-              <>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-6 w-full">
-                  {/* Card 1 */}
-                  <motion.div variants={itemVariants}>
-                    <GlassCard glowColor="green" className="h-full bg-brand-green/5 border-brand-green/20">
-                      <div className="flex flex-col h-full justify-between gap-4">
-                        <div className="flex items-center gap-3 text-brand-green">
-                          <CheckCircle className="w-6 h-6 shrink-0" />
-                          <span className="font-mono text-sm tracking-widest uppercase">Patch Committed</span>
-                        </div>
-                        {prUrl && (
-                          <a 
-                            href={prUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="inline-flex items-center gap-2 text-xs font-mono bg-brand-green/10 text-brand-green hover:bg-brand-green/20 px-3 py-2 rounded border border-brand-green/30 transition-colors w-fit"
-                          >
-                            <GitPullRequest className="w-3 h-3" />
-                            View Pull Request <ExternalLink className="w-3 h-3 ml-1" />
-                          </a>
-                        )}
-                      </div>
-                    </GlassCard>
-                  </motion.div>
+                <ScanScoreboard meta={{
+                  ...summary?.meta,
+                  discoveryStats: summary?.telemetry?.discovery,
+                  replayStats: summary?.telemetry?.replay,
+                  skipReasons: summary?.telemetry?.replay?.skipReasons,
+                  confirmationStats: summary?.telemetry?.confirmation,
+                  rejectionReasons: summary?.telemetry?.confirmation?.rejectionReasons,
+                  remediationStats: summary?.telemetry?.remediation,
+                  githubStats: summary?.telemetry?.github,
+                } as any} />
 
-                  {/* Card 2 */}
-                  <motion.div variants={itemVariants}>
-                    <GlassCard glowColor="green" className="h-full bg-brand-green/5 border-brand-green/20">
-                      <div className="flex items-center gap-3 text-brand-green">
-                        <CheckCircle className="w-6 h-6 shrink-0" />
-                        <span className="font-mono text-sm tracking-widest uppercase">Regression Test Committed</span>
-                      </div>
-                    </GlassCard>
-                  </motion.div>
 
-                  {/* Card 3 */}
-                  <motion.div variants={itemVariants}>
-                    <GlassCard glowColor="green" className="h-full bg-brand-green/5 border-brand-green/20">
-                      <div className="flex items-center gap-3 text-brand-green">
-                        <CheckCircle className="w-6 h-6 shrink-0" />
-                        <span className="font-mono text-sm tracking-widest uppercase">GitHub Actions Armed</span>
-                      </div>
-                    </GlassCard>
-                  </motion.div>
-                </div>
-
-                <AnimatePresence>
-                  {state === 'BANNER_REVEAL' && (
-                    <motion.div
-                      initial={{ opacity: 0, scale: 0.95, filter: 'blur(10px)' }}
-                      animate={{ opacity: 1, scale: 1, filter: 'blur(0px)' }}
-                      transition={{ duration: 1, ease: "easeOut" }}
-                      className="mt-8 text-center"
-                    >
-                      <div className="inline-flex items-center justify-center mb-6">
-                        <VibeAuditLogo size="md" animated={false} />
-                      </div>
-                      <h1 className="text-3xl md:text-4xl font-bold tracking-tight text-white">
-                        Your application is protected today
-                        <br />
-                        <span className="text-brand-green text-glow-green">and on every future deployment.</span>
-                      </h1>
-                      {summaryEvent?.targetUrl && (
-                        <p className="mt-4 text-white/50 font-mono text-sm">{summaryEvent.targetUrl}</p>
-                      )}
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </>
-            ) : (
-              <AnimatePresence>
-                {state === 'BANNER_REVEAL' && (
-                  <motion.div
-                    initial={{ opacity: 0, scale: 0.95, filter: 'blur(10px)' }}
-                    animate={{ opacity: 1, scale: 1, filter: 'blur(0px)' }}
-                    transition={{ duration: 1, ease: "easeOut" }}
-                    className="mt-8 text-center"
-                  >
-                    <div className="inline-flex items-center justify-center mb-6">
-                      <VibeAuditLogo size="md" animated={false} />
-                    </div>
-                    <h1 className="text-3xl md:text-4xl font-bold tracking-tight text-white">
-                      No vulnerabilities found
-                      <br />
-                      <span className="text-brand-green text-glow-green">— your app looks protected.</span>
-                    </h1>
-                    {Boolean(cleanEvent?.payload?.reason) && (
-                      <p className="mt-4 text-white/50 font-mono text-sm uppercase tracking-widest">
-                        Status: {(cleanEvent!.payload!.reason as string).replace('_', ' ')}
-                      </p>
-                    )}
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            )}
-
-            {/* Summary Stats */}
-            {summaryEvent && (
-              <motion.div variants={itemVariants} className="flex justify-center gap-8 mt-4">
-                <div className="text-center font-mono">
-                  <div className="text-2xl font-bold text-white/90">{summaryEvent.endpointsFound ?? 0}</div>
-                  <div className="text-xs text-white/50 uppercase tracking-widest">Endpoints Found</div>
-                </div>
-                <div className="text-center font-mono">
-                  <div className="text-2xl font-bold text-white/90">{summaryEvent.attacksAttempted ?? 0}</div>
-                  <div className="text-xs text-white/50 uppercase tracking-widest">Attacks Attempted</div>
-                </div>
-                <div className="text-center font-mono">
-                  <div className="text-2xl font-bold text-brand-green text-glow-green">{summaryEvent.vulnerabilities ?? 0}</div>
-                  <div className="text-xs text-brand-green/70 uppercase tracking-widest">Vulnerabilities Found</div>
-                </div>
-              </motion.div>
-            )}
 
             <AnimatePresence>
               {state === 'BANNER_REVEAL' && (
@@ -287,6 +214,51 @@ export function VictoryStage({ events, isClean }: VictoryStageProps) {
                   animate={{ opacity: 1, y: 0 }}
                   className="mt-16 flex flex-col items-center gap-6"
                 >
+                  {/* Scan Artifacts Section */}
+                  {summary && reportData && (
+                    <div className="w-full max-w-3xl flex flex-col gap-4 mt-8 mb-8 p-6 bg-black/40 border border-white/10 rounded-lg">
+                      <h3 className="text-lg font-mono text-white/90 border-b border-white/10 pb-2">Scan Artifacts Evidence</h3>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm font-mono text-white/70">
+                        <div><span className="text-white/40">Scan ID:</span> {reportData.scanMeta.scanId}</div>
+                        <div><span className="text-white/40">Duration:</span> {summary.meta.durationMs ? (summary.meta.durationMs / 1000).toFixed(1) + 's' : 'N/A'}</div>
+                        <div><span className="text-white/40">Endpoints Discovered:</span> {summary.telemetry.discovery.totalEndpoints}</div>
+                        <div><span className="text-white/40">Findings:</span> {summary.results.finding ? 1 : 0}</div>
+                        <div className="col-span-1 md:col-span-2 break-all"><span className="text-white/40">Artifact Folder Path:</span> /artifacts/{reportData.scanMeta.scanId}/</div>
+                      </div>
+                      
+                      <div className="flex flex-wrap gap-4 mt-4">
+                        <a 
+                          href={`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000'}/artifacts/${reportData.scanMeta.scanId}/report.json`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded font-mono text-xs text-white transition-colors"
+                        >
+                          Download report.json
+                        </a>
+                        <a 
+                          href={`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000'}/artifacts/${reportData.scanMeta.scanId}/findings.json`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded font-mono text-xs text-white transition-colors"
+                        >
+                          Download findings.json
+                        </a>
+                        <a 
+                          href={`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000'}/artifacts/${reportData.scanMeta.scanId}/zip`}
+                          className="px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded font-mono text-xs text-white transition-colors"
+                        >
+                          Download all artifacts as ZIP
+                        </a>
+                        <button 
+                          onClick={handleExportBenchmark}
+                          className="px-4 py-2 bg-brand-green/10 hover:bg-brand-green/20 border border-brand-green/30 rounded font-mono text-xs text-brand-green transition-colors flex items-center gap-2"
+                        >
+                          Export benchmark row
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
                   {/* PDF Report Download */}
                   {reportData && (
                     <div className="flex items-center">
@@ -305,7 +277,8 @@ export function VictoryStage({ events, isClean }: VictoryStageProps) {
             </AnimatePresence>
           </motion.div>
         )}
-      </AnimatePresence>
+        </AnimatePresence>
+      )}
     </motion.div>
   );
 }

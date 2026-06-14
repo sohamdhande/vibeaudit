@@ -27,18 +27,37 @@ export function RemediationChecklist({ data, pageNumber }: RemediationChecklistP
   const { patch, finding, scanMeta } = data;
   const endpointPattern = extractPattern(finding.endpoint);
 
-  const items = [
-    `Apply patch to ${patch.filePath}`,
-    'Run regression test — confirm 403 response',
-    `Audit all endpoints matching ${endpointPattern} pattern`,
-    'Add ownership validation to shared auth middleware',
-    'Peer code review sign-off obtained',
-    'Deployed to staging environment',
-    'VibeAudit re-scan on staging — result: Clean',
-    'Deployed to production',
-    scanMeta.prUrl ? `GitHub PR merged: ${scanMeta.prUrl}` : 'GitHub PR merged',
-    'Security ticket closed',
-  ];
+  const items = [];
+  if (patch.patchedCode && patch.filePath) {
+    items.push(`Apply patch to ${patch.filePath}`);
+  } else {
+    items.push('Manually develop and apply security patch for the vulnerable endpoint');
+  }
+  
+  if (data.regressionTest) {
+    items.push('Run generated regression test — confirm 403 response');
+  } else {
+    items.push('Develop and run regression test to confirm vulnerability is fixed');
+  }
+
+  items.push(`Audit all endpoints matching ${endpointPattern} pattern`);
+  
+  if (patch.ownershipField) {
+    items.push(`Add ownership validation using the '${patch.ownershipField}' field to shared auth middleware`);
+  }
+
+  items.push('Peer code review sign-off obtained');
+  items.push('Deployed to staging environment');
+  items.push('VibeAudit re-scan on staging — result: Clean');
+  items.push('Deployed to production');
+
+  if (scanMeta.prUrl) {
+    items.push(`GitHub PR merged: ${scanMeta.prUrl}`);
+  } else if (scanMeta.prGenerationAttempted && !scanMeta.prUrl) {
+    items.push('Manually create and merge Pull Request (Automated PR creation failed/skipped)');
+  }
+
+  items.push('Security ticket closed');
 
   return (
     <div className="report-page" style={{ background: '#ffffff', color: '#111111', position: 'relative' }}>

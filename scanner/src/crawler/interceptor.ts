@@ -1,10 +1,13 @@
 import { Page } from 'puppeteer';
 import { DiscoveredEndpoint } from '../types';
 import { redactHeaders } from '../utils/redact';
-import { promises as dns } from 'dns';
+import { isPrivateIP } from '../utils/agent';
+import { normalizePath } from '../utils/dedup';
 
 const AUTH_COOKIE_PATTERN = /session|sess|sid|auth|jwt|token|connect\.sid/i;
-import { isPrivateIP } from '../utils/agent';
+export const harvestedIds = new Set<string>();
+export const capturedIds: Record<string, string> = {};
+
 export async function setupInterceptor(
   page: Page,
   onEndpointDiscovered: (ep: DiscoveredEndpoint) => void
@@ -13,48 +16,7 @@ export async function setupInterceptor(
   const seen = new Set<string>();
   let hasSessionCookie = false;
 
-  // SSRF Protection: Intercept and block requests to private/internal IPs
-  await page.setRequestInterception(true);
-
-  page.on('request', async (request) => {
-    try {
-      if (request.isInterceptResolutionHandled()) return;
-      const url = request.url();
-      
-      // Allow data URIs
-      if (url.startsWith('data:')) {
-        await request.continue();
-        return;
-      }
-
-      const parsedUrl = new URL(url);
-      const hostname = parsedUrl.hostname.toLowerCase();
-      
-      const blockedHostnames = ['localhost', '127.0.0.1', '0.0.0.0', '::1', '169.254.169.254'];
-
-      if (blockedHostnames.includes(hostname)) {
-        await request.abort('accessdenied');
-        return;
-      }
-      
-      try {
-        const lookupResult = await dns.lookup(hostname);
-        if (isPrivateIP(lookupResult.address)) {
-          await request.abort('accessdenied');
-          return;
-        }
-      } catch (err) {
-        await request.abort('namenotresolved');
-        return;
-      }
-
-      await request.continue();
-    } catch (_) {
-      if (!request.isInterceptResolutionHandled()) {
-        await request.continue().catch(() => {});
-      }
-    }
-  });
+  // We removed the SSRF protection block here to allow local scanning of localhost and 127.0.0.1
 
   // Track when the browser acquires a session cookie and intercept redirects
   page.on('response', async (response) => {
@@ -67,19 +29,49 @@ export async function setupInterceptor(
         hasSessionCookie = true;
       }
       
-      // Prevent redirect rebinding
-      const status = response.status();
-      if (status >= 300 && status < 400) {
-        const location = response.headers()['location'];
-        if (location) {
-          const redirectUrl = new URL(location, response.url());
-          const redirectHostname = redirectUrl.hostname.toLowerCase();
-          const lookupResult = await dns.lookup(redirectHostname);
-          if (isPrivateIP(lookupResult.address)) {
-            console.error(`[CRAWLER] Blocked SSRF via redirect to ${location}`);
-            await page.close(); // Close the page forcefully to stop the redirect chain
+      // Prevent redirect rebinding SSRF protection removed for local scanning
+    } catch {}
+  });
+
+  page.on('response', async (response) => {
+    try {
+      if (response.status() === 200 && response.headers()['content-type']?.includes('application/json')) {
+        const text = await response.text();
+        const json = JSON.parse(text);
+        const parsedUrl = new URL(response.url());
+        let basePath = parsedUrl.pathname;
+        if (basePath.endsWith('/')) basePath = basePath.slice(0, -1);
+        // Strip list suffixes so we inject into the base resource path
+        basePath = basePath.replace(/\/(all|recent|list)$/i, '');
+        const normPath = normalizePath(basePath);
+
+        const extractIds = (obj: any) => {
+          if (!obj || typeof obj !== 'object') return;
+          if (Array.isArray(obj)) {
+            if (obj.length > 0) extractIds(obj[0]);
+            return;
           }
-        }
+          for (const key of Object.keys(obj)) {
+            if (/(?:^|_)(id|orderId|vehicleId|postId|userId)$/i.test(key) || /id$/i.test(key)) {
+              if (typeof obj[key] === 'string' || typeof obj[key] === 'number') {
+                const val = String(obj[key]);
+                harvestedIds.add(val);
+                
+                if (normPath.includes(':id')) {
+                  capturedIds[normPath] = val;
+                } else {
+                  capturedIds[`${normPath}/:id`] = val;
+                  const parts = normPath.split('/');
+                  parts.pop();
+                  capturedIds[`${parts.join('/')}/:id`] = val;
+                }
+              }
+            } else if (typeof obj[key] === 'object') {
+              extractIds(obj[key]);
+            }
+          }
+        };
+        extractIds(json);
       }
     } catch {}
   });

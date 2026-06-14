@@ -66,7 +66,7 @@ export function ExecutiveSummary({ data, pageNumber }: ExecutiveSummaryProps) {
             Confidence
           </div>
           <div style={{ fontSize: '18px', fontWeight: 700, color: '#111111' }}>
-            {finding.confidenceScore}%
+            {finding.confidenceScore >= 80 ? 'High' : finding.confidenceScore >= 50 ? 'Medium' : 'Low'}
           </div>
         </div>
       </div>
@@ -94,10 +94,14 @@ export function ExecutiveSummary({ data, pageNumber }: ExecutiveSummaryProps) {
           {finding.endpoint}
         </span>{' '}
         resource by substituting their own session token with a victim&apos;s resource ID.
-        Data exposed includes: <strong>{categories || 'UNKNOWN'}</strong>.
-        This constitutes a direct violation of the principle of least privilege
-        and may trigger regulatory reporting obligations under GDPR, HIPAA,
-        or PCI-DSS depending on the nature of the exposed data.
+        {categories && (
+          <>
+            {' '}Data exposed includes: <strong>{categories}</strong>.
+            Potential regulatory impact depends on the exposed data type, which may
+            include obligations under {regulations.join(', ') || 'applicable data privacy frameworks'}.
+          </>
+        )}
+        {' '}This constitutes a direct violation of the principle of least privilege.
       </p>
 
       <h3 className="report-sub-heading">Recommendation</h3>

@@ -27,9 +27,10 @@ const lookup = (hostname: string, options: dns.LookupOptions, callback: (err: No
   dns.lookup(hostname, options, (err, address, family) => {
     if (err) return callback(err, address, family);
     const ip = typeof address === 'string' ? address : address[0].address;
-    if (isPrivateIP(ip)) {
-      return callback(new Error(`SSRF blocked: IP ${ip} is a private/loopback range`), '', 0);
-    }
+    // SSRF blocked code removed to allow local scanning
+    // if (isPrivateIP(ip)) {
+    //   return callback(new Error(`SSRF blocked: IP ${ip} is a private/loopback range`), '', 0);
+    // }
     callback(null, address, family);
   });
 };

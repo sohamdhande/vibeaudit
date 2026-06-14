@@ -40,11 +40,15 @@ export function ScanMetadata({ data, pageNumber }: ScanMetadataProps) {
     ['Scan Started', formatReportDate(scanMeta.startTime)],
     ['Scan Completed', formatReportDate(scanMeta.endTime)],
     ['Duration', safeFormatDuration(duration)],
-    ['Endpoints Discovered', formatCount(scanMeta.endpointsDiscovered)],
-    ['Endpoints Tested', formatCount(scanMeta.endpointsTested)],
+    ['Endpoints Discovered', formatCount(scanMeta.endpointsDiscovered ?? 0)],
+    ['Endpoints Tested', formatCount(scanMeta.endpointsTested ?? 0)],
     ['Vulnerabilities Found', vulnRatio],
     ['Scanner Version', scanMeta.scannerVersion],
     ['Analysis Engine', scanMeta.aiModel],
+    ['GitHub Repo Owner', scanMeta.githubRepoOwner || 'Not provided'],
+    ['GitHub Repo Name', scanMeta.githubRepoName || 'Not provided'],
+    ['PR Generation Attempted', scanMeta.prGenerationAttempted ? 'Yes' : 'No'],
+    ...(scanMeta.prGenerationSkippedReason ? [['PR Skipped Reason', scanMeta.prGenerationSkippedReason] as [string, string]] : []),
     ['GitHub PR', scanMeta.prUrl || 'Not generated'],
   ];
 
@@ -62,6 +66,33 @@ export function ScanMetadata({ data, pageNumber }: ScanMetadataProps) {
           ))}
         </tbody>
       </table>
+
+      {scanMeta.testedEndpoints && scanMeta.testedEndpoints.length > 0 && (
+        <div style={{ marginTop: '24px' }}>
+          <h3 style={{ fontSize: '12px', fontWeight: 600, color: '#333', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            High-Risk Endpoints Tested
+          </h3>
+          <ul style={{ margin: 0, padding: 0, listStyle: 'none' }}>
+            {scanMeta.testedEndpoints.map((ep, idx) => (
+              <li key={idx} style={{ 
+                fontFamily: "'Courier New', monospace", 
+                fontSize: '11px', 
+                color: '#555',
+                padding: '4px 8px',
+                background: idx % 2 === 0 ? '#f9fafb' : '#ffffff',
+                borderLeft: '2px solid #e5e7eb'
+              }}>
+                {ep}
+              </li>
+            ))}
+          </ul>
+          {(scanMeta.endpointsTested ?? 0) > scanMeta.testedEndpoints.length && (
+            <div style={{ fontSize: '10px', color: '#888', marginTop: '6px', fontStyle: 'italic' }}>
+              + {(scanMeta.endpointsTested ?? 0) - scanMeta.testedEndpoints.length} additional endpoints tested...
+            </div>
+          )}
+        </div>
+      )}
 
       <div style={{
         marginTop: '60px',

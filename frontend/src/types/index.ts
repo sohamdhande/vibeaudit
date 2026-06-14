@@ -73,7 +73,7 @@ export interface PatchResult {
   sessionAccessor: string;
   reasoning: string[];
   patchSource: 'github_ai' | 'response_ai' | 'deterministic';
-  patchValidated?: boolean;
+  patchValidated?: boolean | null;
   prUrl?: string;
 }
 
@@ -95,6 +95,7 @@ export interface SSEPayload {
   prUrl?: string;
   verificationResult?: 'blocked' | 'pending' | null;
   reason?: string;
+  summary?: ScanSummary;
   [key: string]: unknown;
 }
 
@@ -111,6 +112,7 @@ export interface SSEEvent {
   targetUrl?: string;
   scanDurationMs?: number;
   timeToExploitMs?: number | null;
+  [key: string]: any; // Allow arbitrary stats objects passed in summary
 }
 
 export type SeverityLabel = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'CLEAN';
@@ -138,11 +140,72 @@ export interface ScanMeta {
   scanId: string;
   startTime: number;
   endTime: number;
-  endpointsDiscovered: number;
-  endpointsTested: number;
+  endpointsDiscovered: number | null;
+  endpointsTested: number | null;
   scannerVersion: string;
   aiModel: string;
   prUrl: string | null;
+  prGenerationAttempted?: boolean | null;
+  prGenerationSkippedReason?: string | null;
+  githubRepoOwner?: string | null;
+  githubRepoName?: string | null;
+  patchValidated?: boolean | null;
+  patchGenerationAttempted?: boolean | null;
+  patchGenerationSkippedReason?: string | null;
+  testedEndpoints?: string[];
+  
+  // Dashboard Metrics
+  discoveryStats?: {
+    pagesVisited: number | null;
+    totalEndpoints: number | null;
+    uniqueEndpoints: number | null;
+    parameterizedEndpoints: number | null;
+    bolaCandidates: number | null;
+  };
+  replayStats?: {
+    eligible: number | null;
+    tested: number | null;
+    skipped: number | null;
+  };
+  skipReasons?: {
+    missingObjectId: number;
+    authReplayFailed: number;
+    noSecondUser: number;
+    unsupportedRoute: number;
+    parseFailure: number;
+    other: number;
+  };
+  confirmationStats?: {
+    candidates: number | null;
+    rejected: number | null;
+    confirmed: number | null;
+  };
+  rejectionReasons?: {
+    returned403: number;
+    returned404: number;
+    responseMismatch: number;
+    insufficientEvidence: number;
+    diffSimilarityTooLow: number;
+    other: number;
+  };
+  remediationStats?: {
+    attempted: boolean | null;
+    generated: boolean | null;
+    skipped: boolean | null;
+    validated: boolean | null;
+    validationFailed: boolean | null;
+    codeContextConfidence: string | null;
+    patchSkippedReason: string | null;
+  };
+  githubStats?: {
+    repoProvided: boolean;
+    tokenProvided: boolean;
+    attempted: boolean | null;
+    created: boolean | null;
+    skipped: boolean | null;
+    prUrl: string | null;
+    prSkippedReason: string | null;
+  };
 }
 
 export interface ReportData {
@@ -151,4 +214,63 @@ export interface ReportData {
   patch: PatchResult;
   regressionTest: string;
   scanMeta: ScanMeta;
+}
+
+export interface ScanSummary {
+  meta: {
+    scanId: string;
+    targetUrl: string;
+    status: 'success' | 'failure' | 'cancelled' | 'degraded';
+    startTime: number;
+    endTime: number;
+    durationMs: number;
+    scannerVersion: string;
+  };
+  
+  telemetry: {
+    discovery: {
+      pagesVisited: number | null;
+      totalEndpoints: number | null;
+      uniqueEndpoints: number | null;
+      parameterizedEndpoints: number | null;
+      bolaCandidates: number | null;
+    };
+    replay: {
+      eligible: number | null;
+      tested: number | null;
+      skipped: number | null;
+      skipReasons: Record<string, number>;
+    };
+    confirmation: {
+      candidates: number | null;
+      confirmed: number | null;
+      rejected: number | null;
+      rejectionReasons: Record<string, number>;
+    };
+    remediation: {
+      attempted: boolean | null;
+      generated: boolean | null;
+      skipped: boolean | null;
+      validated: boolean | null;
+      validationFailed: boolean | null;
+      codeContextConfidence: string | null;
+      patchSkippedReason: string | null;
+    };
+    github: {
+      repoProvided: boolean;
+      tokenProvided: boolean;
+      attempted: boolean | null;
+      created: boolean | null;
+      skipped: boolean | null;
+      prUrl: string | null;
+      prSkippedReason: string | null;
+    };
+  };
+
+  results: {
+    finding: BOLAFinding | null;
+    patch: PatchResult | null;
+    regressionTest: string | null;
+    prUrl: string | null;
+  };
 }

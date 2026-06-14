@@ -14,7 +14,7 @@ import { AIPatchStage } from '@/components/stages/AIPatchStage';
 import { VictoryStage } from '@/components/stages/VictoryStage';
 
 export default function Home() {
-  const { activeStage, setActiveStage, events, isClean, startScan, error, endpointProgress } = useVibeScanner();
+  const { activeStage, setActiveStage, events, isClean, startScan, error, endpointProgress, scanSummary } = useVibeScanner();
 
   useEffect(() => {
     try {
@@ -56,7 +56,7 @@ export default function Home() {
         )}
 
         {(activeStage === 'verify' || activeStage === 'done' || activeStage === 'summary') && (
-          <VictoryStage key="victory" events={events} isClean={isClean} />
+          <VictoryStage key="victory" events={events} isClean={isClean} summary={scanSummary} />
         )}
       </AnimatePresence>
     </main>

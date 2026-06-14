@@ -105,19 +105,31 @@ export function ReportDiffViewer({ data, pageNumber }: ReportDiffViewerProps) {
   const { patch, scanMeta } = data;
   const displayPatch = patch.displayPatch;
 
-  if (!displayPatch || displayPatch.trim() === '') {
+  if (!displayPatch || displayPatch.trim() === '' || scanMeta.patchGenerationAttempted === false) {
     return (
       <div className="report-page" style={{ position: 'relative', background: '#ffffff', color: '#111111' }}>
-        <h2 className="report-section-heading">AI-GENERATED SECURITY PATCH</h2>
-        <div style={{ padding: '1rem', border: '1px solid #e0e0e0', borderRadius: '4px', fontStyle: 'italic', color: '#555', fontSize: '13px' }}>
-          {scanMeta.prUrl 
-            ? `Diff committed to GitHub PR: ${scanMeta.prUrl}`
-            : 'Diff not available for this scan.'
-          }
+        <h2 className="report-section-heading" style={{ color: '#c0392b', borderBottomColor: '#c0392b' }}>
+          Patch Generation Skipped
+        </h2>
+        <div style={{ padding: '16px', background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: '6px', color: '#991b1b', fontSize: '13px', lineHeight: 1.6 }}>
+          <strong style={{ display: 'block', marginBottom: '8px' }}>Reason: Insufficient code context for safe remediation</strong>
+          {scanMeta.patchGenerationSkippedReason || 'The analysis engine could not confidently identify the framework, file path, ownership field, or auth context.'}
         </div>
-        <div style={{ marginTop: '1rem', fontSize: '13px' }}>
-          <strong>Ownership field:</strong> {patch.ownershipField || 'unknown'}<br/>
-          <strong>Auth library:</strong> {patch.authLibrary || 'unknown'}
+        
+        <div style={{ marginTop: '24px', fontSize: '13px', color: '#333' }}>
+          <h3 className="report-sub-heading">Detected Context</h3>
+          <ul style={{ paddingLeft: '20px', lineHeight: 1.8 }}>
+            <li><strong>Endpoint:</strong> <code style={{ background: '#f3f4f6', padding: '1px 4px', borderRadius: '3px', fontFamily: "'Courier New', monospace" }}>{data.finding.endpoint}</code></li>
+            {patch.ownershipField && patch.ownershipField !== 'manual-review' && (
+              <li><strong>Ownership Field:</strong> <code style={{ background: '#f3f4f6', padding: '1px 4px', borderRadius: '3px', fontFamily: "'Courier New', monospace" }}>{patch.ownershipField}</code></li>
+            )}
+            {patch.authLibrary && (
+              <li><strong>Auth Library:</strong> {patch.authLibrary}</li>
+            )}
+            {patch.filePath && patch.filePath !== 'unknown' && (
+              <li><strong>File Path:</strong> {patch.filePath}</li>
+            )}
+          </ul>
         </div>
         <div style={PAGE_NUMBER_STYLE}>Page {pageNumber} of 9 — CONFIDENTIAL</div>
       </div>
@@ -178,18 +190,22 @@ export function ReportDiffViewer({ data, pageNumber }: ReportDiffViewerProps) {
         )}
 
         <div style={{ fontSize: '13px', color: '#555555', marginTop: '12px' }}>
-          <div>
-            <strong>Ownership field used:</strong>{' '}
-            <code className="report-mono" style={{ background: '#f3f4f6', padding: '1px 4px', borderRadius: '3px' }}>
-              {patch.ownershipField}
-            </code>
-          </div>
-          <div style={{ marginTop: '4px' }}>
-            <strong>Auth library:</strong>{' '}
-            <code className="report-mono" style={{ background: '#f3f4f6', padding: '1px 4px', borderRadius: '3px' }}>
-              {patch.authLibrary}
-            </code>
-          </div>
+          {patch.ownershipField && (
+            <div>
+              <strong style={{ color: '#333333' }}>Ownership field used:</strong>{' '}
+              <code className="report-mono" style={{ background: '#f3f4f6', padding: '1px 4px', borderRadius: '3px' }}>
+                {patch.ownershipField}
+              </code>
+            </div>
+          )}
+          {patch.authLibrary && (
+            <div style={{ marginTop: '4px' }}>
+              <strong style={{ color: '#333333' }}>Auth library:</strong>{' '}
+              <code className="report-mono" style={{ background: '#f3f4f6', padding: '1px 4px', borderRadius: '3px' }}>
+                {patch.authLibrary}
+              </code>
+            </div>
+          )}
         </div>
       </div>
 

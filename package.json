@@ -1,0 +1,8 @@
+{
+  "dependencies": {
+    "archiver": "^8.0.0"
+  },
+  "devDependencies": {
+    "@types/archiver": "^8.0.0"
+  }
+}

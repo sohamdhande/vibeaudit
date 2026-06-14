@@ -248,9 +248,9 @@ ${sensitiveFieldsList}
 
 ${fixSection}
 
-**Ownership Field:** \`${escapeMarkdown(patch.ownershipField)}\`  
-**Auth Library:** ${escapeMarkdown(patch.authLibrary)}  
-**Session Accessor:** \`${escapeMarkdown(patch.sessionAccessor)}\`  
+**Ownership Field:** \`${escapeMarkdown(patch.ownershipField || 'Not detected')}\`  
+**Auth Library:** ${escapeMarkdown(patch.authLibrary || 'Not detected')}  
+**Session Accessor:** \`${escapeMarkdown(patch.sessionAccessor || 'Not detected')}\`  
 
 ### Regression Test
 A Playwright test has been added at \`tests/security/bola-regression.spec.ts\`.  

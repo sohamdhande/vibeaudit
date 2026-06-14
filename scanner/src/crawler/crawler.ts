@@ -1,7 +1,7 @@
 import puppeteer, { Page } from 'puppeteer';
-import { setupInterceptor } from './interceptor';
+import { setupInterceptor, harvestedIds, capturedIds } from './interceptor';
 import { DiscoveredEndpoint, ScanConfig, UserCredentials } from '../types';
-import { deduplicateEndpoints } from '../utils/dedup';
+import { deduplicateEndpoints, normalizePath } from '../utils/dedup';
 
 // Generic regex to detect parameterized resource links in the DOM
 const PARAMETERIZED_LINK_PATTERN = /\/[a-zA-Z0-9_-]+\/([a-z0-9_-]{4,}|\d+|[A-Z]+-\d+)$/;
@@ -141,17 +141,7 @@ export async function detectAndLogin(
   }
 
   // STEP 5 - VERIFY LOGIN SUCCESS
-  // 1. Check cookies first
-  const cookies = await page.cookies();
-  const sessionCookie = cookies.find(c => /session|token|auth|sid|jwt|user/i.test(c.name));
-
-  if (sessionCookie) {
-    logUpdate('Login successful — session cookie detected');
-    logUpdate('Auth type detected: cookie');
-    return { type: 'cookie' as const, value: `${sessionCookie.name}=${sessionCookie.value}` };
-  }
-
-  // 2. Check localStorage
+  // 1. Check localStorage
   const hasLsToken = await page.evaluate(() => {
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i);
@@ -168,7 +158,7 @@ export async function detectAndLogin(
     return { type: 'jwt' as const, value: 'true' };
   }
 
-  // 3. Check sessionStorage
+  // 2. Check sessionStorage
   const hasSsToken = await page.evaluate(() => {
     for (let i = 0; i < sessionStorage.length; i++) {
       const key = sessionStorage.key(i);
@@ -185,20 +175,33 @@ export async function detectAndLogin(
     return { type: 'jwt' as const, value: 'true' };
   }
 
+  // 3. Check cookies
+  const cookies = await page.cookies();
+  const sessionCookie = cookies.find(c => /session|token|auth|sid|jwt|user/i.test(c.name));
+
+  if (sessionCookie) {
+    logUpdate('Login successful — session cookie detected');
+    logUpdate('Auth type detected: cookie');
+    return { type: 'cookie' as const, value: `${sessionCookie.name}=${sessionCookie.value}` };
+  }
+
   throw new LoginFailedError('Could not detect session cookie or JWT token after login. Try specifying loginFieldSelectors manually.');
 }
+
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 export async function crawl(
   config: ScanConfig,
   onEndpointDiscovered: (ep: DiscoveredEndpoint) => void,
   onStageUpdate?: (stage: string, msg: string) => void,
   signal?: AbortSignal
-): Promise<{ endpoints: DiscoveredEndpoint[]; durationMs: number; authType: 'cookie' | 'jwt' | 'unknown'; authValue?: string }> {
+): Promise<{ endpoints: DiscoveredEndpoint[]; durationMs: number; authType: 'cookie' | 'jwt' | 'unknown'; authValue?: string; stats?: any }> {
   const start = Date.now();
   const targetUrl = config.targetUrl.replace(/\/+$/, '');
   const loginPath = config.loginPath || '/login';
   const pagesToCrawl = config.pagesToCrawl?.length ? config.pagesToCrawl : ['/dashboard'];
-
 
   const logUpdate = (msg: string) => {
     console.log(`[CRAWLER] ${msg}`);
@@ -206,6 +209,7 @@ export async function crawl(
   };
 
   let browser: any;
+  let userDataDir: string | undefined;
   let detectedAuth: { type: 'cookie'|'jwt', value: string } | undefined;
   const emptyResult = () => ({
     endpoints: [] as DiscoveredEndpoint[],
@@ -214,10 +218,23 @@ export async function crawl(
   });
   try {
     logUpdate('Before launchBrowser');
+    
+    userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "vibeaudit-chrome-"));
     const browserLaunchTimeout = 30_000;
     const launchPromise = puppeteer.launch({
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu'],
+      userDataDir,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-crash-reporter",
+        "--disable-extensions",
+        "--disable-background-networking",
+        "--disable-sync",
+      ],
     }).then(b => { browser = b; return b; });
     
     const timeoutPromise = new Promise<never>((_, reject) =>
@@ -246,7 +263,7 @@ export async function crawl(
       return emptyResult();
     }
 
-    const page = await browser.newPage();
+    let page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
 
     // Set up network interception before any navigation
@@ -260,7 +277,9 @@ export async function crawl(
         return emptyResult();
       }
       await page.goto(`${targetUrl}${loginPath}`, { waitUntil: 'networkidle2', timeout: 15000 });
-      await new Promise(r => setTimeout(r, 1000));
+      // Wait for React to hydrate and render inputs before detecting login form
+      await page.waitForSelector('input', { timeout: 10000 }).catch(() => {});
+      await new Promise(r => setTimeout(r, 2000));
     } catch (e: unknown) {
       console.error('[CRAWLER] Failed to goto login:', e instanceof Error ? e.message : String(e));
       await page.close().catch(() => {});
@@ -319,40 +338,41 @@ export async function crawl(
         await new Promise(r => setTimeout(r, 2000));
         
         // Check for Auth Type
-        const cookies = await page.cookies();
-        const sessionCookie = cookies.find((c: any) => /session|token|auth|sid|jwt|user/i.test(c.name));
-        
-        if (sessionCookie) {
-          logUpdate(`Session cookie found: ${sessionCookie.name}=[REDACTED]`);
-          logUpdate('Auth type detected: cookie');
+        const hasLsToken = await page.evaluate(() => {
+          for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (key && /token|jwt|access_token|auth/i.test(key)) return !!localStorage.getItem(key);
+          }
+          return false;
+        });
+
+        if (hasLsToken) {
+          logUpdate('Auth token detected in localStorage');
+          logUpdate('Auth type detected: jwt');
           logUpdate('Login success');
-          detectedAuth = { type: 'cookie', value: `${sessionCookie.name}=${sessionCookie.value}` };
+          detectedAuth = { type: 'jwt', value: 'true' };
         } else {
-          const hasLsToken = await page.evaluate(() => {
-            for (let i = 0; i < localStorage.length; i++) {
-              const key = localStorage.key(i);
-              if (key && /token|jwt|access_token|auth/i.test(key)) return !!localStorage.getItem(key);
+          const hasSsToken = await page.evaluate(() => {
+            for (let i = 0; i < sessionStorage.length; i++) {
+              const key = sessionStorage.key(i);
+              if (key && /token|jwt|access_token|auth/i.test(key)) return !!sessionStorage.getItem(key);
             }
             return false;
           });
-          if (hasLsToken) {
-            logUpdate('Auth token detected in localStorage');
+          if (hasSsToken) {
+            logUpdate('Auth token detected in sessionStorage');
             logUpdate('Auth type detected: jwt');
             logUpdate('Login success');
             detectedAuth = { type: 'jwt', value: 'true' };
           } else {
-            const hasSsToken = await page.evaluate(() => {
-              for (let i = 0; i < sessionStorage.length; i++) {
-                const key = sessionStorage.key(i);
-                if (key && /token|jwt|access_token|auth/i.test(key)) return !!sessionStorage.getItem(key);
-              }
-              return false;
-            });
-            if (hasSsToken) {
-              logUpdate('Auth token detected in sessionStorage');
-              logUpdate('Auth type detected: jwt');
+            const cookies = await page.cookies();
+            const sessionCookie = cookies.find((c: any) => /session|token|auth|sid|jwt|user/i.test(c.name));
+            
+            if (sessionCookie) {
+              logUpdate(`Session cookie found: ${sessionCookie.name}=[REDACTED]`);
+              logUpdate('Auth type detected: cookie');
               logUpdate('Login success');
-              detectedAuth = { type: 'jwt', value: 'true' };
+              detectedAuth = { type: 'cookie', value: `${sessionCookie.name}=${sessionCookie.value}` };
             } else {
               logUpdate(`WARNING: No session cookie or JWT token found. Available cookies: ${cookies.map((c: any) => c.name).join(', ')}`);
               logUpdate('[AUTH ERROR] User A/B login failed — check credentials and login path.');
@@ -373,18 +393,40 @@ export async function crawl(
     }
 
     // Step 3: Crawl authenticated pages
+    let pagesVisited = 0;
     const crawlPages = async (extraWait: number) => {
       for (const path of pagesToCrawl) {
         try {
+          pagesVisited++;
           if (signal?.aborted) {
             await browser.close().catch(console.error);
             return;
           }
           logUpdate(`Navigating to ${path}...`);
-          await withTimeout(
-            page.goto(`${targetUrl}${path}`, { waitUntil: 'networkidle2' }),
-            15000, `goto ${path}`
-          );
+          try {
+            if (page.isClosed()) {
+              logUpdate(`Page closed unexpectedly, opening new page...`);
+              page = await browser.newPage();
+              await setupInterceptor(page, onEndpointDiscovered);
+            }
+            await withTimeout(
+              page.goto(`${targetUrl}${path}`, { waitUntil: 'networkidle2' }),
+              15000, `goto ${path}`
+            );
+          } catch (navErr: any) {
+            if (navErr.message?.includes('detached Frame') || navErr.message?.includes('Target closed') || navErr.message?.includes('Navigating frame was detached')) {
+              logUpdate(`Frame detached or target closed on ${path}, recreating page context...`);
+              try { await page.close(); } catch {}
+              page = await browser.newPage();
+              await setupInterceptor(page, onEndpointDiscovered);
+              await withTimeout(
+                page.goto(`${targetUrl}${path}`, { waitUntil: 'networkidle2' }),
+                15000, `goto ${path}`
+              );
+            } else {
+              throw navErr;
+            }
+          }
 
           // Wait for at least one link to appear (SPA hydration)
           try {
@@ -396,6 +438,7 @@ export async function crawl(
           // Additional SPA hydration wait
           await new Promise(r => setTimeout(r, extraWait));
 
+          if (page.isClosed()) continue;
           const currentUrl = page.url();
           logUpdate(`After navigating to ${path}, actual URL: ${currentUrl}`);
           // screenshot removed
@@ -524,18 +567,80 @@ export async function crawl(
         return emptyResult();
       }
     }
+
+    // Endpoint Fuzzer: intelligently append IDs to routes identified as 404 or 400
+    const fuzzTargets = endpoints.filter(ep => {
+      const isError = ep.statusCode >= 400 || ep.statusCode === 0;
+      const hasNullId = ep.path.endsWith('/null') || ep.path.endsWith('/undefined') || ep.path.endsWith('/0');
+      const isBaseRoute = !ep.path.includes('.') && ep.path.split('/').length >= 3;
+      return isError && (hasNullId || isBaseRoute);
+    });
+
+    if (fuzzTargets.length > 0 && page && !page.isClosed()) {
+      logUpdate(`[FUZZER] Fuzzing ${fuzzTargets.length} potential parameterized endpoints...`);
+      const fuzzPaths = new Set<string>();
+      
+      for (const ep of fuzzTargets) {
+        // Strip invalid IDs to get the base path
+        let basePath = ep.path.replace(/\/(null|undefined|0)$/i, '');
+        // Remove trailing slashes
+        basePath = basePath.replace(/\/+$/, '');
+        
+        // Guess common numeric IDs
+        fuzzPaths.add(`${basePath}/1`);
+        fuzzPaths.add(`${basePath}/2`);
+        fuzzPaths.add(`${basePath}/3`);
+        fuzzPaths.add(`${basePath}/123`);
+        
+        // Guess some common string/UUID formats if the API expects them
+        fuzzPaths.add(`${basePath}/test`);
+        
+        // Inject harvested IDs from all intercepted API responses
+        for (const id of harvestedIds) {
+          fuzzPaths.add(`${basePath}/${id}`);
+        }
+      }
+
+      try {
+        await page.evaluate(async (paths: string[]) => {
+          for (const p of paths) {
+            try { await fetch(p, { credentials: 'include', signal: AbortSignal.timeout(5000) }); } catch {}
+          }
+        }, Array.from(fuzzPaths));
+        // Wait for interceptor to catch the fuzzing responses
+        await new Promise(r => setTimeout(r, 3000));
+      } catch (_) {
+        logUpdate('[FUZZER] Failed to execute endpoint fuzzer in browser context');
+      }
+    }
     
     const dedupedEndpoints = deduplicateEndpoints(endpoints);
     logUpdate(`Crawl complete. Found ${endpoints.length} endpoints (${dedupedEndpoints.length} unique patterns after dedup)`);
+    
+    let finalAuthType = detectedAuth?.type || 'unknown';
+    if (endpoints.some(ep => ep.authMethod === 'jwt')) {
+      finalAuthType = 'jwt';
+    }
+
     return {
       endpoints: dedupedEndpoints,
       durationMs: Date.now() - start,
-      authType: detectedAuth?.type || 'unknown',
-      authValue: detectedAuth?.value
+      authType: finalAuthType,
+      authValue: detectedAuth?.value,
+      capturedIds,
+      stats: {
+        pagesVisited: pagesVisited,
+        endpointsDiscovered: endpoints.length,
+        uniqueEndpoints: dedupedEndpoints.length,
+        parameterizedEndpoints: dedupedEndpoints.filter(ep => normalizePath(ep.path).includes(':id')).length,
+      }
     };
   } finally {
     if (browser) {
       await browser.close().catch(console.error);
+    }
+    if (userDataDir) {
+      try { fs.rmSync(userDataDir, { recursive: true, force: true }); } catch (e) { console.error('Failed to cleanup userDataDir', e); }
     }
   }
 }

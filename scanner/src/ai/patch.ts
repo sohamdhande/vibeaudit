@@ -373,11 +373,40 @@ export async function generatePatch(
   }
 
   let patchedCode: string = '';
-  let patchSource: 'github_ai' | 'response_ai' | 'deterministic' | 'manual_review_required' = manualReviewRequired ? 'manual_review_required' : 'deterministic';
+  let patchSource: PatchResult['patchSource'] = 'deterministic';
+  let patchSkippedReason: string | null = null;
+  let patchGenerationAttempted = true;
+
+  if (manualReviewRequired || !githubCode) {
+    emit('[AI] Skipping patch generation — insufficient code context for safe remediation.');
+    patchGenerationAttempted = false;
+    patchSkippedReason = !githubCode 
+      ? 'Source file path could not be confidently identified in the repository.' 
+      : 'Ownership field or auth context could not be confidently inferred from the source code.';
+    
+    return {
+      originalCode: sourceCode,
+      patchedCode: '',
+      displayPatch: '',
+      filePath: vulnerableFilePath,
+      ownershipField: ownershipField || null,
+      authLibrary: authLibrary !== 'Unknown' ? authLibrary : null,
+      sessionAccessor: sessionAccessor || null,
+      reasoning: [
+        'Patch generation skipped',
+        `Reason: ${patchSkippedReason}`,
+        `Detected endpoint: ${finding.endpoint}`
+      ],
+      patchSource: 'skipped',
+      patchValidated: false,
+      patchGenerationAttempted: false,
+      patchGenerationSkippedReason: patchSkippedReason,
+    };
+  }
+
   const groqKey = process.env.GROQ_API_KEY;
 
-  // TIER 1 — GitHub Source + Groq AI
-  if (githubCode && !manualReviewRequired && groqKey && groqKey.length > 10) {
+  if (groqKey && groqKey.length > 10) {
     emit('[AI] Calling AI engine with source context...');
     try {
       const response = await groqWithRetry({
@@ -420,79 +449,33 @@ Return the complete fixed file with the correct ownership check returning a 403 
     }
   }
 
-  // TIER 2 — Response-Based Groq AI
-  if (patchSource === 'deterministic' && !manualReviewRequired && groqKey && groqKey.length > 10) {
-    if (!githubCode) emit('[AI] GitHub unavailable — generating patch from response analysis...');
-    else emit('[AI] Generating patch from response analysis fallback...');
-
-    try {
-      const sensitiveKeys = finding.sensitiveFields.map(f => f.key).join(', ');
-      const exploitContext = finding.attackerAuthenticated
-        ? 'an authenticated attacker using their own session cookie'
-        : 'an unauthenticated attacker with no session';
-
-      const promptStr = `You are a security engineer. A BOLA vulnerability was found at ${finding.endpoint}. An attacker (${exploitContext}) could access ${sensitiveKeys} belonging to another user.
-      
-Response Data:
-${sanitizeUntrustedData(JSON.stringify(shrinkJSON(finding.stolenData), null, 2), 'RESPONSE DATA')}
-
-Generate a generic ownership validation middleware or route guard in TypeScript/Node.js that fixes this. Return ONLY valid code, no markdown, no explanation.`;
-
-      const response = await groqWithRetry({
-        model: 'llama-3.3-70b-versatile',
-        max_tokens: 1500,
-        temperature: 0,
-        messages: [
-          { role: 'system', content: 'You are a security engineer. Return ONLY valid code, no markdown, no explanation.' },
-          { role: 'user', content: promptStr }
-        ]
-      });
-
-      const aiOutput = response.choices[0]?.message?.content?.trim() || '';
-      if (aiOutput.length > 50) {
-        patchedCode = aiOutput.replace(/^```(?:typescript|ts)?\n?/gm, '').replace(/```$/gm, '').trim();
-        patchSource = 'response_ai';
-        emit('[AI] AI patch generated from response analysis ✓');
-      } else {
-        emit('[AI] AI engine output invalid, falling back to template...');
-      }
-    } catch (err: unknown) {
-      emit(`[AI] AI engine error: ${err instanceof Error ? err.message : String(err)}. Falling back to template...`);
-    }
+  if (!patchedCode) {
+    emit('[AI] AI unavailable or failed — unable to generate safe patch without hallucinations.');
+    patchGenerationAttempted = true;
+    patchSkippedReason = 'AI engine failed to generate a syntactically valid patch with the correct ownership checks.';
+    
+    return {
+      originalCode: sourceCode,
+      patchedCode: '',
+      displayPatch: '',
+      filePath: vulnerableFilePath,
+      ownershipField: ownershipField || null,
+      authLibrary: authLibrary !== 'Unknown' ? authLibrary : null,
+      sessionAccessor: sessionAccessor || null,
+      reasoning: [
+        'Patch generation failed',
+        `Reason: ${patchSkippedReason}`
+      ],
+      patchSource: 'skipped',
+      patchValidated: false,
+      patchGenerationAttempted,
+      patchGenerationSkippedReason: patchSkippedReason,
+    };
   }
 
-  // TIER 3 — Deterministic Template
-  if (patchSource === 'deterministic' || patchSource === 'manual_review_required') {
-    emit('[AI] AI unavailable or failed — generating template patch...');
-    const sensitiveKeys = finding.sensitiveFields.map(f => f.key).join(', ');
-    patchedCode = `// VibeAudit Security Patch
-// Vulnerability: BOLA at ${finding.endpoint}
-// Fix: Add ownership validation before returning data
+  let patchValidated = true;
 
-async function validateOwnership(
-  requestedId: string, 
-  sessionUserId: string,
-  resourceType: string
-): Promise<boolean> {
-  if (requestedId !== sessionUserId) {
-    throw new Error('Forbidden: You do not own this resource');
-  }
-  return true;
-}
-
-// Apply this check in your ${finding.endpoint} handler:
-// await validateOwnership(params.id, session.user.id, '[resource]')
-
-// Original exposed fields that require protection: ${sensitiveKeys}
-`;
-  }
-
-  // ── ESBUILD VALIDATION ──────────────────────────────────────────────────
-  // Validate the AI-generated patch before it goes anywhere near GitHub.
-  // Only run validation for AI-generated patches (not deterministic templates).
-  let patchValidated = !manualReviewRequired;
-
-  if ((patchSource === 'github_ai' || patchSource === 'response_ai') && groqKey && groqKey.length > 10) {
+  if (patchSource === 'github_ai' && groqKey && groqKey.length > 10) {
     emit('[PATCH] Validating generated patch syntax...');
     await sleep(300);
 

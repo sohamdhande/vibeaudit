@@ -2,40 +2,13 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ChevronDown, ChevronUp, Terminal, User, UserX, Clock, Trash2, ChevronRight } from 'lucide-react';
 import { GlassCard } from '../ui/GlassCard';
-import { ScanConfig, ScanHistoryEntry } from '@/types';
-import { ScanHistoryModal } from '../ui/ScanHistoryModal';
+import { ScanConfig } from '@/types';
 import { VibeAuditLogo } from '../VibeAuditLogo';
 
-function timeAgo(ts: number): string {
-  const seconds = Math.floor((Date.now() - ts) / 1000);
-  if (seconds < 60) return 'just now';
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
-}
-
-function getDateGroup(ts: number): string {
-  const now = new Date();
-  const d = new Date(ts);
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const yesterday = new Date(today.getTime() - 86400000);
-  if (d >= today) return 'Today';
-  if (d >= yesterday) return 'Yesterday';
-  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  return `${months[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
-}
 
 
 
-function getSeverityBadge(entry: ScanHistoryEntry): { emoji: string; label: string; cls: string } {
-  if (entry.status === 'clean') return { emoji: '✅', label: 'CLEAN', cls: 'bg-green-500/20 text-green-400 border-green-500/30' };
-  if (entry.status === 'vulnerable') return { emoji: '🔴', label: 'VULNERABLE', cls: 'bg-red-500/20 text-red-400 border-red-500/30' };
-  if (entry.status === 'blocked') return { emoji: '✅', label: 'PATCHED', cls: 'bg-green-500/20 text-green-400 border-green-500/30' };
-  return { emoji: '⚠️', label: 'ERROR', cls: 'bg-white/10 text-white/50 border-white/20' };
-}
+
 
 interface LandingStageProps {
   onStart: (config: ScanConfig) => void;
@@ -89,16 +62,6 @@ export function LandingStage({ onStart, error }: LandingStageProps) {
   };
 
   const [isScanning, setIsScanning] = useState(false);
-  const [history, setHistory] = useState<ScanHistoryEntry[]>([]);
-  const [selectedEntry, setSelectedEntry] = useState<ScanHistoryEntry | null>(null);
-
-  useEffect(() => {
-    try {
-      const stored = JSON.parse(localStorage.getItem('vibeaudit_history') || '[]');
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setHistory(stored);
-    } catch {}
-  }, []);
 
   // Validation
   const isUrlValid = url.length === 0 || url.startsWith('http://') || url.startsWith('https://');
@@ -459,77 +422,10 @@ export function LandingStage({ onStart, error }: LandingStageProps) {
           {isScanning ? 'Validating...' : 'Launch Security Scan'}
         </button>
 
-        {/* Scan History */}
-        {history.length > 0 && (
-          <GlassCard glowColor="none" className="p-4">
-            <div className="flex items-center justify-between mb-4">
-              <span className="text-xs font-mono text-white/50 uppercase tracking-wider flex items-center gap-2">
-                <Clock className="w-3.5 h-3.5" /> Scan History
-              </span>
-              <button
-                onClick={() => { localStorage.removeItem('vibeaudit_history'); setHistory([]); }}
-                className="text-[10px] font-mono text-white/30 hover:text-white/60 transition-colors flex items-center gap-1"
-              >
-                <Trash2 className="w-3 h-3" /> Clear All
-              </button>
-            </div>
 
-            {(() => {
-              const groups: Record<string, ScanHistoryEntry[]> = {};
-              history.forEach((e) => {
-                const g = getDateGroup(e.timestamp);
-                if (!groups[g]) groups[g] = [];
-                groups[g].push(e);
-              });
-
-              return Object.entries(groups).map(([group, entries]) => (
-                <div key={group} className="mb-3 last:mb-0">
-                  <div className="text-[10px] font-mono text-white/30 uppercase tracking-wider mb-2">{group}</div>
-                  <div className="space-y-1.5">
-                    {entries.map((entry) => {
-
-                      const truncatedUrl = entry.id;
-                      const detail = entry.status === 'vulnerable' ? 'Vulnerable' : 'Clean';
-
-                      return (
-                        <button
-                          key={entry.id}
-                          onClick={() => setSelectedEntry(entry)}
-                          className="w-full text-left bg-white/[0.02] hover:bg-white/[0.05] border border-white/5 rounded-md px-3 py-2.5 transition-all group"
-                        >
-                          <div className="flex items-center gap-3">
-                            <span className="text-xs font-mono text-white/70 truncate flex-1 group-hover:text-white transition-colors">{truncatedUrl}</span>
-
-                            <span className="text-[10px] font-mono text-white/20 shrink-0">{timeAgo(entry.timestamp)}</span>
-                            <ChevronRight className="w-3.5 h-3.5 text-white/15 group-hover:text-white/40 transition-colors shrink-0" />
-                          </div>
-                          <div className="ml-[72px] mt-1">
-                            <span className="text-[10px] font-mono text-white/25 truncate block">{detail}</span>
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              ));
-            })()}
-          </GlassCard>
-        )}
       </div>
 
-      {/* History Modal */}
-      {selectedEntry && (
-        <ScanHistoryModal
-          entry={selectedEntry}
-          onClose={() => setSelectedEntry(null)}
-          onDelete={(id) => {
-            const updated = history.filter(h => h.id !== id);
-            setHistory(updated);
-            localStorage.setItem('vibeaudit_history', JSON.stringify(updated));
-            setSelectedEntry(null);
-          }}
-        />
-      )}
+
     </motion.div>
   );
 }

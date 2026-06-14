@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { ScanConfig, ScanHistoryEntry, SSEEvent, SSEStage, getSeverity } from '../types';
+import { ScanConfig, ScanHistoryEntry, SSEEvent, SSEStage, getSeverity, ScanSummary } from '../types';
 
 
 
@@ -70,6 +70,7 @@ export function useVibeScanner() {
     return false;
   });
   const [error, setError] = useState<string | null>(null);
+  const [scanSummary, setScanSummary] = useState<ScanSummary | null>(null);
   const [isClean, setIsClean] = useState(false);
   const [endpointProgress, setEndpointProgress] = useState<{
     current: string | null;
@@ -97,33 +98,7 @@ export function useVibeScanner() {
   const reconnectAttemptsRef = useRef<number>(0);
 
   // Accumulated data across SSE events for history
-  const accumulatedFinding = useRef<{
-    endpoint: string | null;
-    sensitiveFields: string[];
-    confidenceScore: number | null;
-    patch: string | null;
-    patchSource: string | null;
-    regressionTest: string | null;
-    prUrl: string | null;
-    exploitConfirmedAt: number | null;
-    verificationResult: 'blocked' | 'pending' | null;
-    curlReproduction: string | null;
-    victimResourceId: string | null;
-    method: string | null;
-  }>({
-    endpoint: null,
-    sensitiveFields: [],
-    confidenceScore: null,
-    patch: null,
-    patchSource: null,
-    regressionTest: null,
-    prUrl: null,
-    exploitConfirmedAt: null,
-    verificationResult: null,
-    curlReproduction: null,
-    victimResourceId: null,
-    method: null,
-  });
+  
 
   // Flush buffer to state
   const flushBuffer = useCallback(() => {
@@ -169,44 +144,6 @@ export function useVibeScanner() {
       clearActiveScan();
     }
 
-    const acc = accumulatedFinding.current;
-
-    // Generic extraction from payload
-    if (event.payload && typeof event.payload === 'object') {
-      if (event.payload.endpoint || event.payload.url) {
-        acc.endpoint = event.payload.endpoint || event.payload.url || null;
-      }
-      if (event.payload.sensitiveFields && Array.isArray(event.payload.sensitiveFields)) {
-        const fields = event.payload.sensitiveFields.map((f: unknown) =>
-          typeof f === 'string' ? f : (f as {key?: string})?.key || String(f)
-        );
-        acc.sensitiveFields = [...new Set([...acc.sensitiveFields, ...fields])];
-      }
-      if (event.payload.confidenceScore !== undefined) {
-        acc.confidenceScore = event.payload.confidenceScore;
-      }
-      if (event.payload.patch || event.payload.patchedCode || event.payload.code) {
-        acc.patch = event.payload.patchedCode || event.payload.patch || event.payload.code || null;
-      }
-      if (event.payload.patchSource) {
-        acc.patchSource = event.payload.patchSource;
-      }
-      if (event.payload.regressionTest || event.payload.testCode) {
-        acc.regressionTest = event.payload.regressionTest || event.payload.testCode || null;
-      }
-      if (event.payload.prUrl) {
-        acc.prUrl = event.payload.prUrl;
-      }
-    }
-
-    // Stage-specific manual overrides just in case
-    if (event.stage === 'attack' && event.type === 'finding') {
-      acc.exploitConfirmedAt = Date.now();
-      if (event.payload?.curlReproduction) acc.curlReproduction = event.payload.curlReproduction as string;
-      if (event.payload?.victimResourceId) acc.victimResourceId = event.payload.victimResourceId as string;
-      if (event.payload?.method) acc.method = event.payload.method as string;
-    }
-
     // Per-endpoint progress tracking
     if (event.stage === 'attack' && (event.type === 'testing' || event.type === 'vulnerable' || event.type === 'safe')) {
       const ep = (event.payload?.endpoint as string) || '';
@@ -223,118 +160,11 @@ export function useVibeScanner() {
       }));
     }
 
-    // Save to scan history on summary event
-    if ((event.stage as string) === 'summary' && (event.type as string) === 'result' && scanConfigRef.current) {
-      try {
-        const vuln = (event.vulnerabilities ?? 0) > 0;
-        // Prefer fields from the summary event payload first, fallback to accumulated state
-        const endpoint = event.payload?.endpoint || acc.endpoint;
-        const confidence = event.payload?.confidenceScore ?? acc.confidenceScore;
-        let fields = acc.sensitiveFields;
-        if (event.payload?.sensitiveFields && Array.isArray(event.payload.sensitiveFields)) {
-          fields = event.payload.sensitiveFields as string[];
-        }
-        const patch = event.payload?.patch || acc.patch;
-        const patchSource = event.payload?.patchSource || acc.patchSource;
-        const regressionTest = event.payload?.regressionTest || acc.regressionTest;
-        const prUrl = event.payload?.prUrl || acc.prUrl;
-
-        if (vuln) {
-          getSeverity(confidence ?? 75);
-        }
-
-        console.log('[HISTORY] Building entry:', { vuln, confidence, endpoint, fields, patch: !!patch });
-
-        const entry: ScanHistoryEntry = {
-          id: `scan_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-          timestamp: Date.now(),
-          status: vuln ? 'vulnerable' : 'clean',
-          endpoint: endpoint || null,
-          confidenceScore: confidence || null,
-          sensitiveFields: fields || [],
-          patch: patch || null,
-          prUrl: prUrl || null,
-        };
-        const existing: ScanHistoryEntry[] = JSON.parse(localStorage.getItem('vibeaudit_history') || '[]');
-        const updated = [entry, ...existing].slice(0, 10);
-        localStorage.setItem('vibeaudit_history', JSON.stringify(updated));
-        console.log('[HISTORY] Saved entry:', entry.id);
-
-        if (vuln) {
-          try {
-            // Strip Cookie headers from curlReproduction
-            let safeCurl = acc.curlReproduction || '';
-            safeCurl = safeCurl.replace(/(Cookie|Authorization|X-Auth-Token):\s*\S+/gi, '$1: [REDACTED]');
-            
-            console.log('[VibeAudit] patch object keys:', patch ? Object.keys(patch) : 'patch is null');
-            console.log('[VibeAudit] displayPatch value:', (patch as unknown as Record<string, unknown>)?.displayPatch || (patch as unknown as Record<string, unknown>)?.display_patch || (patch as unknown as Record<string, unknown>)?.diff || (typeof patch === 'string' ? 'is string' : 'MISSING'));
-            
-            // Build ReportData blob
-            const reportData = {
-              scanConfig: {
-                targetUrl: scanConfigRef.current?.targetUrl || 'Unknown',
-                userA: { email: '', password: '' },
-                userB: { email: '', password: '' }
-              },
-              finding: {
-                endpoint: endpoint || 'Unknown',
-                method: acc.method || 'GET',
-                victimToken: '[REDACTED]',
-                attackerToken: '[REDACTED]',
-                victimResourceId: acc.victimResourceId || '',
-                stolenData: {},
-                sensitiveFields: fields.map(f => ({ key: f, value: '[REDACTED]', category: 'UNKNOWN' as const })),
-                attackerAuthenticated: true,
-                curlReproduction: safeCurl,
-                cvssScore: confidence && confidence >= 90 ? 8.9 : 7.2,
-                confidenceScore: confidence || 0,
-              },
-              patch: {
-                displayPatch: (patch as unknown as Record<string, unknown>)?.displayPatch as string || (patch as unknown as Record<string, unknown>)?.display_patch as string || (patch as unknown as Record<string, unknown>)?.diff as string || (typeof patch === 'string' ? patch : ''),
-                filePath: (patch as unknown as Record<string, unknown>)?.filePath as string || (patch as unknown as Record<string, unknown>)?.file_path as string || 'unknown',
-                explanation: (patch as unknown as Record<string, unknown>)?.explanation as string || null,
-                ownershipField: (patch as unknown as Record<string, unknown>)?.ownershipField as string || (patch as unknown as Record<string, unknown>)?.ownership_field as string || null,
-                authLibrary: (patch as unknown as Record<string, unknown>)?.authLibrary as string || (patch as unknown as Record<string, unknown>)?.auth_library as string || null,
-                originalCode: '',
-                patchedCode: '',
-                sessionAccessor: 'req.user.id',
-                reasoning: (patch as unknown as Record<string, unknown>)?.reasoning as string[] || [],
-                patchSource: patchSource || 'response_ai',
-              },
-              regressionTest: regressionTest || '// No regression test available',
-              scanMeta: {
-                scanId: entry.id,
-                startTime: Date.now(),
-                endTime: Date.now(),
-                endpointsDiscovered: event.endpointsFound || 0,
-                endpointsTested: event.attacksAttempted || 0,
-                scannerVersion: '1.0.0',
-                aiModel: 'AI-powered analysis',
-                prUrl: prUrl || null,
-              }
-            };
-            
-            // Cleanup old blobs (keep last 5)
-            const keys = Object.keys(localStorage).filter(k => k.startsWith('vibeaudit_report_'));
-            if (keys.length >= 5) {
-              const sortedKeys = keys.sort((a, b) => {
-                const itemA = localStorage.getItem(a);
-                const itemB = localStorage.getItem(b);
-                const tA = itemA ? JSON.parse(itemA).scanMeta?.startTime : 0;
-                const tB = itemB ? JSON.parse(itemB).scanMeta?.startTime : 0;
-                return tA - tB;
-              });
-              for (let i = 0; i <= keys.length - 5; i++) {
-                localStorage.removeItem(sortedKeys[i]);
-              }
-            }
-            localStorage.setItem(`vibeaudit_report_${entry.id}`, JSON.stringify(reportData));
-          } catch (e) {
-            console.error('[HISTORY] Failed to save report data', e);
-          }
-        }
-      } catch (histErr) {
-        console.error('[HISTORY] Failed to save:', histErr);
+    // Handle summary event
+    if ((event.stage as string) === 'summary' && (event.type as string) === 'result') {
+      const summary = event.summary || event.payload?.summary;
+      if (summary) {
+        setScanSummary(summary);
       }
     }
 
@@ -461,6 +291,7 @@ export function useVibeScanner() {
     currentSessionTokenRef.current = sessionToken;
 
     setEvents([]);
+    setScanSummary(null);
     setIsScanning(true);
     setError(null);
     setIsClean(false);
@@ -468,20 +299,7 @@ export function useVibeScanner() {
     eventBufferRef.current = [];
     scanConfigRef.current = config;
     currentScanIdRef.current = null;
-    accumulatedFinding.current = {
-      endpoint: null,
-      sensitiveFields: [],
-      confidenceScore: null,
-      patch: null,
-      patchSource: null,
-      regressionTest: null,
-      prUrl: null,
-      exploitConfirmedAt: null,
-      verificationResult: null,
-      curlReproduction: null,
-      victimResourceId: null,
-      method: null,
-    };
+    
     setEndpointProgress({
       current: null,
       method: null,
@@ -505,7 +323,14 @@ export function useVibeScanner() {
       });
 
       if (sessionToken !== currentSessionTokenRef.current) return;
-      if (!response.ok) throw new Error(`Failed to start scan: ${response.statusText}`);
+      if (!response.ok) {
+        let errMsg = response.statusText;
+        try {
+          const body = await response.json();
+          if (body && body.error) errMsg = body.error;
+        } catch { }
+        throw new Error(`Failed to start scan: ${errMsg}`);
+      }
 
       const reader = response.body?.getReader();
       const decoder = new TextDecoder();
@@ -568,5 +393,5 @@ export function useVibeScanner() {
     clearActiveScan();
   }, []);
 
-  return { activeStage, setActiveStage, events, isScanning, error, isClean, startScan, stopScan, endpointProgress };
+  return { activeStage, setActiveStage, events, isScanning, error, isClean, startScan, stopScan, endpointProgress, scanSummary };
 }

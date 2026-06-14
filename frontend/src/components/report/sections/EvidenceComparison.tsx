@@ -86,6 +86,12 @@ export function EvidenceComparison({ data, pageNumber }: EvidenceComparisonProps
                   <td style={{ padding: '6px 10px', fontWeight: 600, color: '#555' }}>Auth</td>
                   <td style={{ padding: '6px 10px', fontSize: '10px' }}>Authenticated (owner)</td>
                 </tr>
+                {finding.victimResourceId && (
+                  <tr style={{ background: '#f9fafb' }}>
+                    <td style={{ padding: '6px 10px', fontWeight: 600, color: '#555' }}>Resource ID</td>
+                    <td style={{ padding: '6px 10px', fontFamily: "'Courier New', monospace", fontSize: '10px' }}>{finding.victimResourceId}</td>
+                  </tr>
+                )}
                 {stolenFields.map((field, i) => (
                   <tr key={i} style={{ background: i % 2 === 0 ? '#f9fafb' : '#ffffff' }}>
                     <td style={{ padding: '6px 10px', fontWeight: 600, color: '#555', fontFamily: "'Courier New', monospace", fontSize: '10px' }}>{field.key}</td>
@@ -131,6 +137,12 @@ export function EvidenceComparison({ data, pageNumber }: EvidenceComparisonProps
                     {finding.attackerAuthenticated ? 'Authenticated (non-owner)' : 'Unauthenticated'}
                   </td>
                 </tr>
+                {finding.victimResourceId && (
+                  <tr style={{ background: '#fef2f2' }}>
+                    <td style={{ padding: '6px 10px', fontWeight: 600, color: '#555' }}>Requested ID</td>
+                    <td style={{ padding: '6px 10px', fontFamily: "'Courier New', monospace", color: severityColor, fontWeight: 600, fontSize: '10px' }}>{finding.victimResourceId} ⚠</td>
+                  </tr>
+                )}
                 {stolenFields.map((field, i) => (
                   <tr key={i} style={{ background: i % 2 === 0 ? '#fef2f2' : '#ffffff' }}>
                     <td style={{ padding: '6px 10px', fontWeight: 600, color: '#555', fontFamily: "'Courier New', monospace", fontSize: '10px' }}>{field.key}</td>

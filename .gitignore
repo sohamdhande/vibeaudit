@@ -32,3 +32,18 @@ docker-compose.override.yml
 .vscode/
 *.swp
 *.swo
+
+# VibeAudit Scanner Output
+.chrome-profile*/
+artifacts/
+test_*.mjs
+test_*.ts
+fix_*.ts
+fix*.js
+patch*.js
+test*.js
+run*.js
+*.patch
+scan_output.txt
+benchmarks.md
+scripts/

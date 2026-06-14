@@ -1,6 +1,9 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import fs from 'fs';
+import path from 'path';
+import archiver from 'archiver';
 import { crawl } from './crawler/crawler';
 import { runBOLAAttack } from './attack/bola';
 import { generatePatch } from './ai/patch';
@@ -8,12 +11,160 @@ import { generatePlaywrightTest } from './tests/playwright-generator';
 import { createSecurityPR } from './github/pr';
 import { verifyPatch } from './verify/verify';
 import { formatSensitiveField } from './attack/sensitive';
-import { ScanConfig, SSEEvent, SSEStage, SSEType } from './types';
+import { ScanConfig, SSEEvent, SSEStage, SSEType, ScanSummary } from './types';
 import { sleep } from './utils/agent';
 import { promises as dns } from 'dns';
 import crypto from 'crypto';
+
+
+function buildTelemetry(
+  endpoints: any[],
+  crawlerStats: any | undefined,
+  attackStats: any | undefined,
+  patch: any | null,
+  config: any,
+  prUrl: string | null,
+  prGenerationAttempted: boolean,
+  prGenerationSkippedReason: string | null
+) {
+  let isDegraded = false;
+  
+  // DISCOVERY
+  let totalEndpoints = null;
+  let uniqueEndpoints = null;
+  let pagesVisited = null;
+  let parameterizedEndpoints = null;
+  
+  if (crawlerStats?.stats) {
+    if (crawlerStats.stats.endpointsDiscovered !== endpoints.length) {
+      console.warn(`[TELEMETRY DISCREPANCY] Crawler reported ${crawlerStats.stats.endpointsDiscovered} but got ${endpoints.length} array. Using ${endpoints.length} as trusted.`);
+      isDegraded = true;
+    }
+    totalEndpoints = endpoints.length; // Array is ground truth
+    uniqueEndpoints = crawlerStats.stats.uniqueEndpoints;
+    pagesVisited = crawlerStats.stats.pagesVisited;
+    parameterizedEndpoints = crawlerStats.stats.parameterizedEndpoints;
+  } else {
+    console.warn('[TELEMETRY MISSING] Crawler stats missing. Falling back to array length.');
+    totalEndpoints = endpoints.length;
+    uniqueEndpoints = endpoints.length;
+    isDegraded = true;
+  }
+
+  // ATTACK
+  let replay = { eligible: null as number | null, tested: null as number | null, skipped: null as number | null, skipReasons: {} as Record<string, number> };
+  let confirmation = { candidates: null as number | null, confirmed: null as number | null, rejected: null as number | null, rejectionReasons: {} as Record<string, number> };
+  
+  let bolaCandidates = null;
+  
+  if (attackStats) {
+    replay = attackStats.replay || replay;
+    confirmation = attackStats.confirmation || confirmation;
+    bolaCandidates = attackStats.replay?.eligible ?? null;
+  } else {
+    console.warn('[TELEMETRY MISSING] Attack engine stats missing.');
+    isDegraded = true;
+  }
+
+  // REMEDIATION
+  const remediation = {
+    attempted: patch ? patch.patchGenerationAttempted : null,
+    generated: patch ? !!patch.patchedCode : null,
+    skipped: patch ? patch.patchGenerationAttempted === false : null,
+    validated: patch ? patch.patchValidated : null,
+    validationFailed: patch ? !!(patch.patchGenerationAttempted && !patch.patchValidated) : null,
+    codeContextConfidence: patch ? (patch.patchGenerationAttempted ? 'High' : 'Low') : null,
+    patchSkippedReason: patch ? (patch.patchGenerationSkippedReason || null) : (attackStats ? 'No vulnerability found' : null)
+  };
+  
+  if (!patch) {
+    // Expected if no finding, but if there was a finding and no patch object, it's missing
+    // We handle that inherently since findingCount === 0 logic checks it
+  }
+
+  // GITHUB
+  const github = {
+    repoProvided: !!config.githubRepoOwner && !!config.githubRepoName,
+    tokenProvided: !!(config.githubToken || process.env.GITHUB_TOKEN),
+    attempted: prGenerationAttempted,
+    created: !!prUrl,
+    skipped: prGenerationAttempted === false,
+    prUrl: prUrl || null,
+    prSkippedReason: prGenerationSkippedReason || null
+  };
+
+  return {
+    isDegraded,
+    telemetry: {
+      discovery: { pagesVisited, totalEndpoints, uniqueEndpoints, parameterizedEndpoints, bolaCandidates },
+      replay,
+      confirmation,
+      remediation,
+      github
+    }
+  };
+}
+
+function validateSummary(summary: ScanSummary) {
+  let isDegraded = false;
+  const r = summary.telemetry.replay;
+  if (r.tested !== null && r.skipped !== null && r.eligible !== null) {
+    if (r.tested + r.skipped !== r.eligible) {
+      console.error(`[TELEMETRY VALIDATION FAILED] Replay invariant failed: tested(${r.tested}) + skipped(${r.skipped}) !== eligible(${r.eligible})`);
+      r.tested = null;
+      r.skipped = null;
+      r.eligible = null;
+      isDegraded = true;
+    }
+  }
+
+  const c = summary.telemetry.confirmation;
+  if (c.confirmed !== null && c.rejected !== null && c.candidates !== null) {
+    if (c.confirmed + c.rejected !== c.candidates) {
+      console.error(`[TELEMETRY VALIDATION FAILED] Confirmation invariant failed: confirmed(${c.confirmed}) + rejected(${c.rejected}) !== candidates(${c.candidates})`);
+      c.confirmed = null;
+      c.rejected = null;
+      c.candidates = null;
+      isDegraded = true;
+    }
+  }
+
+  const disc = summary.telemetry.discovery;
+  if (disc.bolaCandidates !== null && disc.parameterizedEndpoints !== null && disc.bolaCandidates > disc.parameterizedEndpoints) {
+    console.error(`[TELEMETRY VALIDATION FAILED] Discovery invariant failed: bolaCandidates(${disc.bolaCandidates}) > parameterizedEndpoints(${disc.parameterizedEndpoints})`);
+    disc.bolaCandidates = null;
+    isDegraded = true;
+  }
+  
+  if (disc.parameterizedEndpoints !== null && disc.uniqueEndpoints !== null && disc.parameterizedEndpoints > disc.uniqueEndpoints) {
+    console.error(`[TELEMETRY VALIDATION FAILED] Discovery invariant failed: parameterizedEndpoints(${disc.parameterizedEndpoints}) > uniqueEndpoints(${disc.uniqueEndpoints})`);
+    disc.parameterizedEndpoints = null;
+    isDegraded = true;
+  }
+
+  const rem = summary.telemetry.remediation;
+  const findingCount = summary.results.finding ? 1 : 0;
+  if (rem.generated && findingCount === 0) {
+    console.error(`[TELEMETRY VALIDATION FAILED] Remediation invariant failed: patchGenerated(true) but confirmedFindings(0)`);
+    rem.generated = null;
+    isDegraded = true;
+  }
+
+  const gh = summary.telemetry.github;
+  if (gh.created && !gh.attempted) {
+    console.error(`[TELEMETRY VALIDATION FAILED] GitHub invariant failed: prCreated(true) but prAttempted(false)`);
+    gh.created = null;
+    isDegraded = true;
+  }
+
+  if (isDegraded && summary.meta.status === 'success') {
+    summary.meta.status = 'degraded';
+  }
+}
+
 import { redactHeaders } from './utils/redact';
 import { isPrivateIP } from './utils/agent';
+import { ArtifactManager } from './artifacts/artifact-manager';
 dotenv.config();
 
 process.on('uncaughtException', (err) => {
@@ -43,7 +194,7 @@ const activeScansInterval = setInterval(() => {
   }
 }, 60_000);
 
-const app = express();
+export const app = express();
 app.use(cors({
   origin: process.env.FRONTEND_ORIGIN || 'http://localhost:3000'
 }));
@@ -164,11 +315,14 @@ export async function validateScanInput(body: any): Promise<string | null> {
     const lookupResult = await dns.lookup(hostname);
     const resolvedIp = lookupResult.address;
     
-    if (isPrivateIP(resolvedIp)) {
+    // VibeAudit is primarily a local developer tool, so we allow scanning private/local network addresses.
+    // In a multi-tenant cloud environment, this should be blocked via env vars.
+    if (isPrivateIP(resolvedIp) && process.env.BLOCK_PRIVATE_IPS === 'true') {
       return 'Target URL resolves to a private or blocked network address.';
     }
   } catch (err) {
-    return 'Target URL failed DNS resolution.';
+    console.warn(`[WARN] Target URL failed DNS resolution: ${hostname}`);
+    // We don't hard block here because Docker service names might fail dns.lookup but work in fetch
   }
 
   // 5. Credentials must exist
@@ -286,11 +440,16 @@ app.post('/scan', requireApiKey, scanLimiter, async (req, res) => {
   let heartbeat: NodeJS.Timeout | null = null;
   const aborted = { value: false };
 
+  const artifactManager = new ArtifactManager(scanId);
+
   function emit(stage: SSEStage, type: SSEType, message: string, payload?: any) {
     if (aborted.value) return;
+    artifactManager.appendLog(message).catch(console.error);
     emitSSE(res, { stage, type, message, payload, timestamp: Date.now() }, scanId);
   }
 
+  let scanStartTime = Date.now();
+  let config: ScanConfig | undefined;
   try {
   console.log('[SCAN] Request received');
 
@@ -311,9 +470,6 @@ app.post('/scan', requireApiKey, scanLimiter, async (req, res) => {
   // Disable Nagle's algorithm so small SSE chunks aren't batched
   res.socket?.setNoDelay(true);
 
-  // Emit scanId as the very first event so the frontend can capture it
-  emit('preflight', 'log', `Scan ID: ${scanId}`, { scanId });
-
   const abortController = new AbortController();
   const { signal } = abortController;
 
@@ -333,11 +489,12 @@ app.post('/scan', requireApiKey, scanLimiter, async (req, res) => {
     }
   }, 2000);
 
-  const scanStartTime = Date.now();
+
   let exploitConfirmedTime: number | null = null;
 
   // ── PARSE CONFIG ──────────────────────────────
-  const { targetUrl, userA, userB, loginPath, pagesToCrawl, loginFieldSelectors, authType, githubRepoOwner, githubRepoName, githubBaseBranch, githubToken: bodyGithubToken } = req.body;
+  const { userA, userB, loginPath, pagesToCrawl, loginFieldSelectors, authType, githubRepoOwner, githubRepoName, githubBaseBranch, githubToken: bodyGithubToken } = req.body;
+  let targetUrl = req.body.targetUrl;
     
     if (!targetUrl) {
       emit('preflight', 'error', 'targetUrl is required');
@@ -352,7 +509,7 @@ app.post('/scan', requireApiKey, scanLimiter, async (req, res) => {
       throw new Error('userB credentials are required');
     }
 
-    const config: ScanConfig = {
+      config = {
       targetUrl: targetUrl.replace(/\/+$/, ''),
       userA,
       userB,
@@ -374,6 +531,11 @@ app.post('/scan', requireApiKey, scanLimiter, async (req, res) => {
     if (config.pagesToCrawl.length === 0) {
       config.pagesToCrawl = ['/dashboard'];
     }
+
+    await artifactManager.startScan(config);
+
+    // Emit scanId as the very first event so the frontend can capture it
+    emit('preflight', 'log', `Scan ID: ${scanId}`, { scanId });
 
     // ── PREFLIGHT ──────────────────────────────
     emit('preflight', 'log', 'Scanner initialized');
@@ -440,14 +602,27 @@ app.post('/scan', requireApiKey, scanLimiter, async (req, res) => {
       crawlTimeoutId = setTimeout(() => {
         abortController.abort();
         reject(new Error('Crawler timeout'));
-      }, 60000);
+      }, 300000); // Increased to 5 minutes to accommodate large crawls
     });
     
-    crawlerPromise.catch(() => {});
-    const { endpoints, durationMs, authType: crawlerAuthType } = await Promise.race([crawlerPromise, timeoutPromise]).finally(() => clearTimeout(crawlTimeoutId));
+    let crawlerResult;
+    try {
+      crawlerResult = await Promise.race([crawlerPromise, timeoutPromise]).finally(() => clearTimeout(crawlTimeoutId));
+    } catch (err: any) {
+      if (!aborted.value) {
+        artifactManager.appendLog(`[ERROR] ${err.message || 'Crawler failed'}`);
+        emit('done', 'error', `Crawler failed: ${err.message}`);
+      }
+      return;
+    }
+    const { endpoints, durationMs, authType: crawlerAuthType, stats: crawlerStats, capturedIds } = crawlerResult;
 
     if (crawlerAuthType === 'jwt') {
       emit('crawler', 'log', 'Detected JWT authentication — switching to Bearer token mode');
+    }
+
+    for (const ep of endpoints) {
+      await artifactManager.recordEndpoint(ep);
     }
 
     emit('crawler', 'complete', `Discovery complete: ${endpoints.length} API endpoints found in ${(durationMs / 1000).toFixed(1)}s`, { endpoints, durationMs });
@@ -473,6 +648,7 @@ app.post('/scan', requireApiKey, scanLimiter, async (req, res) => {
         if (args.length >= 3) emit(args[0], args[1], args[2], args[3]);
         else emit('attack', 'log', args[0], args[1]);
       },
+      capturedIds,
       abortController.signal
     );
 
@@ -480,6 +656,26 @@ app.post('/scan', requireApiKey, scanLimiter, async (req, res) => {
       console.log(`[SCAN] Scan completed cleanly (reason: ${result.reason})`);
       emit('attack', 'complete', 'No exploitable BOLA vulnerability found on tested endpoints.');
       
+      const hasToken = !!(config.githubToken || process.env.GITHUB_TOKEN);
+      
+      const teleRes = buildTelemetry(endpoints, crawlerStats, result.attackStats, null, config, null, false, 'No vulnerability found');
+      const summary: ScanSummary = {
+        meta: {
+          scanId,
+          targetUrl: config.targetUrl,
+          status: 'degraded',
+          startTime: scanStartTime,
+          endTime: Date.now(),
+          durationMs: Date.now() - scanStartTime,
+          scannerVersion: '2.0.0'
+        },
+        telemetry: teleRes.telemetry,
+        results: {
+          finding: null, patch: null, regressionTest: null, prUrl: null
+        }
+      };
+      validateSummary(summary);
+
       if (!aborted.value) {
         emitSSE(res, {
           stage: 'complete',
@@ -492,18 +688,16 @@ app.post('/scan', requireApiKey, scanLimiter, async (req, res) => {
         emitSSE(res, {
           stage: 'summary',
           type: 'result',
-          endpointsFound: endpoints.length,
-          vulnerabilities: 0,
-          attacksAttempted: endpoints.length,
-          targetUrl: config.targetUrl,
-          scanDurationMs: Date.now() - scanStartTime,
-          timeToExploitMs: null,
-          timestamp: Date.now()
+          message: 'Scan summary generated',
+          timestamp: Date.now(),
+          summary
         }, scanId);
       }
 
       const cleanScan = activeScans.get(scanId);
       if (cleanScan) cleanScan.completed = true;
+
+      await artifactManager.finishScan('success', summary);
 
       if (heartbeat) clearInterval(heartbeat);
       res.end();
@@ -512,6 +706,8 @@ app.post('/scan', requireApiKey, scanLimiter, async (req, res) => {
 
     const finding = result.finding;
     exploitConfirmedTime = Date.now();
+
+    await artifactManager.recordFinding(finding);
 
     // Stream sensitive fields one by one for dramatic effect
     emit('attack', 'log', '── Stolen Record Data ──────────────────');
@@ -580,11 +776,21 @@ app.post('/scan', requireApiKey, scanLimiter, async (req, res) => {
 
     const hasToken = !!(config.githubToken);
     const hasRepo = !!(config.githubRepoOwner && config.githubRepoName);
-    if (!hasToken || !hasRepo) {
-      // skip PR silently
+    
+    let prGenerationSkippedReason: string | null = null;
+    let prGenerationAttempted = false;
+
+    if (!hasToken && !hasRepo) {
+      prGenerationSkippedReason = 'GitHub token and repository details not provided';
+    } else if (!hasToken) {
+      prGenerationSkippedReason = 'GitHub token not provided';
+    } else if (!hasRepo) {
+      prGenerationSkippedReason = 'GitHub repository owner/name not provided';
     } else if (!patch.patchedCode || !patch.filePath) {
+      prGenerationSkippedReason = 'No patch content available to create PR';
       emit('github', 'log', '[GITHUB] No patch content. Skipping PR.');
     } else {
+      prGenerationAttempted = true;
       console.log('[PR GUARD] patchValidated value:', patch?.patchValidated);
       emit('github', 'log', '[GITHUB] Preparing Pull Request...');
       await sleep(1000);
@@ -608,8 +814,13 @@ app.post('/scan', requireApiKey, scanLimiter, async (req, res) => {
       } catch (err: unknown) {
         console.error('[SCAN_ERROR]', err);
         const errorMessage = err instanceof Error ? err.message : String(err);
+        prGenerationSkippedReason = `GitHub PR failed: ${errorMessage}`;
         emit('github', 'error', `GitHub PR failed: ${errorMessage}`);
       }
+    }
+
+    if (prGenerationSkippedReason && !prGenerationAttempted) {
+      emit('github', 'log', `[GITHUB] PR Generation skipped: ${prGenerationSkippedReason}`);
     }
 
     // ── VERIFY ────────────────────────────────
@@ -630,36 +841,49 @@ app.post('/scan', requireApiKey, scanLimiter, async (req, res) => {
 
     // ── DONE ──────────────────────────────────
     console.log('[SCAN] Scan completed');
+    
+    const teleRes = buildTelemetry(endpoints, crawlerStats, result.attackStats, patch, config, prUrl, prGenerationAttempted ?? false, prGenerationSkippedReason || null);
+    const summary: ScanSummary = {
+      meta: {
+        scanId,
+        targetUrl: config.targetUrl,
+        status: 'vulnerable',
+        startTime: scanStartTime,
+        endTime: Date.now(),
+        durationMs: Date.now() - scanStartTime,
+        scannerVersion: '2.0.0'
+      },
+      telemetry: teleRes.telemetry,
+      results: {
+        finding, patch, regressionTest: playwrightTest, prUrl
+      }
+    };
+    validateSummary(summary);
+
     emit('done', 'complete', 'Scan completed');
 
     if (!aborted.value) {
       emitSSE(res, {
         stage: 'summary',
         type: 'result',
-        endpointsFound: endpoints.length,
-        vulnerabilities: 1,
-        attacksAttempted: endpoints.length,
-        targetUrl: config.targetUrl,
-        scanDurationMs: Date.now() - scanStartTime,
-        timeToExploitMs: exploitConfirmedTime ? exploitConfirmedTime - scanStartTime : null,
+        message: 'Scan summary generated',
         timestamp: Date.now(),
-        // Pass everything directly in summary for safety
-        endpoint: finding.endpoint,
-        sensitiveFields: finding.sensitiveFields.map(f => f.key),
-        confidenceScore: finding.confidenceScore,
-        patch: patch.patchedCode,
-        patchSource: patch.patchSource,
-        regressionTest: playwrightTest,
-        prUrl: prUrl,
+        summary
       }, scanId);
+      await artifactManager.finishScan('success', summary);
       res.end();
     }
-
   } catch (err: unknown) {
     console.error('[SCAN_ERROR]', err);
     const errorMessage = err instanceof Error ? err.message : String(err);
     emit('done', 'error', `[ERROR] ${errorMessage}`);
     emit('done', 'error', `Scan failed: ${errorMessage}`);
+    const summary: ScanSummary = {
+      meta: { scanId, targetUrl: config?.targetUrl || '', status: 'failure', startTime: scanStartTime, endTime: Date.now(), durationMs: Date.now() - scanStartTime, scannerVersion: '2.0.0' },
+      telemetry: { discovery: { pagesVisited: null, totalEndpoints: null, uniqueEndpoints: null, parameterizedEndpoints: null, bolaCandidates: null }, replay: { eligible: null, tested: null, skipped: null, skipReasons: {} }, confirmation: { candidates: null, confirmed: null, rejected: null, rejectionReasons: {} }, remediation: { attempted: null, generated: null, skipped: null, validated: null, validationFailed: null, codeContextConfidence: null, patchSkippedReason: errorMessage }, github: { repoProvided: false, tokenProvided: false, attempted: null, created: null, skipped: null, prUrl: null, prSkippedReason: null } },
+      results: { finding: null, patch: null, regressionTest: null, prUrl: null }
+    };
+    await artifactManager.finishScan('failure', summary);
   } finally {
     activeCount = Math.max(0, activeCount - 1);
 
@@ -674,6 +898,28 @@ app.post('/scan', requireApiKey, scanLimiter, async (req, res) => {
   }
 });
 
+app.get('/artifacts/:scanId/zip', (req, res) => {
+  const { scanId } = req.params;
+  const artifactDir = path.join(process.cwd(), 'artifacts', scanId);
+  
+  if (!fs.existsSync(artifactDir)) {
+    res.status(404).json({ error: 'Artifacts not found' });
+    return;
+  }
+
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', `attachment; filename="vibeaudit-scan-${scanId}.zip"`);
+
+  const archive = archiver('zip', { zlib: { level: 9 } });
+  archive.on('error', (err: any) => res.status(500).send({ error: err.message }));
+  
+  archive.pipe(res);
+  archive.directory(artifactDir, false);
+  archive.finalize();
+});
+
+app.use('/artifacts', express.static(path.join(process.cwd(), 'artifacts')));
+
 app.get('/health', (_, res) => res.json({
   status: 'ok',
 }));
@@ -684,9 +930,6 @@ if (!process.env.VIBEAUDIT_API_KEY || process.env.VIBEAUDIT_API_KEY.length < 32)
   throw new Error('VIBEAUDIT_API_KEY must be at least 32 characters');
 }
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n  VibeAudit Scanner v2.0.0`);
-  console.log(`  → http://localhost:${PORT}`);
-  console.log(`  → POST /scan { targetUrl, userA, userB, ... }`);
-  console.log(`  → GET  /health\n`);
+app.listen(PORT, () => {
+  console.log(`[SCANNER] API running on http://localhost:${PORT}`);
 });

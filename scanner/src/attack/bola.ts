@@ -5,23 +5,44 @@ import { detectAndLogin, LoginFailedError } from '../crawler/crawler';
 import { detectSensitiveFields } from './sensitive';
 import { safeHttpAgent, safeHttpsAgent } from '../utils/agent';
 import { analyzeVulnerability } from '../ai/patch';
+import fs from 'fs';
+import { normalizePath } from '../utils/dedup';
 
 function extractResourceId(data: any): any {
   if (!data || typeof data !== 'object') return null;
-  const idFields = ['id', '_id', 'userId', 'recordId', 'resourceId', 'uuid'];
+  
+  if (Array.isArray(data)) {
+    for (const item of data) {
+      const found = extractResourceId(item);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  const idFields = ['id', '_id', 'userId', 'recordId', 'resourceId', 'uuid', 'orderId', 'vehicleId', 'mechanicId', 'postId'];
   for (const field of idFields) {
     if (Object.prototype.hasOwnProperty.call(data, field) && data[field] != null) {
       return data[field];
     }
   }
+
+  // Deep search
+  for (const key of Object.keys(data)) {
+    if (typeof data[key] === 'object') {
+      const found = extractResourceId(data[key]);
+      if (found) return found;
+    }
+  }
+
   return null;
 }
 
 function isResourceIdShaped(value: string): boolean {
   if (!value) return false;
-  if (/^\d+$/.test(value)) return true;
-  if (/^[0-9a-f-]{36}$/i.test(value)) return true;
-  if (/^[A-Z0-9_-]{4,64}$/i.test(value)) return true;
+  if (/^\d{1,20}$/.test(value)) return true;
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) return true;
+  if (/^[A-Z]+-\d+$/i.test(value)) return true;
+  if (/^[A-Z0-9]{16,64}$/i.test(value) && /[0-9]/.test(value) && /[A-Z]/i.test(value)) return true;
   return false;
 }
 
@@ -29,17 +50,24 @@ async function getPuppeteerSession(
   targetUrl: string,
   creds: UserCredentials,
   config: ScanConfig,
+  authType: 'cookie' | 'jwt' | 'unknown',
   label: string,
   signal?: AbortSignal
-): Promise<string> {
+): Promise<{ token: string; csrfToken: string | null }> {
   const baseUrl = targetUrl.replace(/\/+$/, '');
   const loginPath = config.loginPath || '/login';
   
   let browser;
   try {
+    const profilePath = require('path').join(require('os').tmpdir(), `chrome-profile-attack-${label}`);
+    try { fs.rmSync(profilePath, { recursive: true, force: true }); } catch {}
+    const isMac = process.platform === 'darwin';
     browser = await puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu'],
+      headless: true, // We can keep headless true for the attack phase if we want, or false if it needs to match. Let's make it match crawler.ts to be safe
+      executablePath: isMac ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : undefined,
+      userDataDir: profilePath,
+      ignoreHTTPSErrors: true,
+      args: ['--disable-web-security']
     });
 
     const page = await browser.newPage();
@@ -52,20 +80,73 @@ async function getPuppeteerSession(
 
     const sessionPromise = (async () => {
       if (signal?.aborted) throw new Error('Scan aborted');
+
+      let capturedJwt: string | null = null;
+      let capturedCsrfToken: string | null = null;
+
+      page.on('request', (req) => {
+        const headers = req.headers();
+        const auth = headers['authorization'];
+        if (auth && auth.toLowerCase().startsWith('bearer ')) {
+          capturedJwt = auth.substring(7).trim();
+        }
+        const csrf = headers['x-csrf-token'] || headers['csrf-token'];
+        if (csrf) {
+          capturedCsrfToken = csrf;
+        }
+      });
+
       await page.goto(`${baseUrl}${loginPath}`, { waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {});
       if (signal?.aborted) throw new Error('Scan aborted');
-      await new Promise(r => setTimeout(r, 1000));
+      await page.waitForSelector('input', { timeout: 10000 }).catch(() => {});
+      await new Promise(r => setTimeout(r, 2000));
       
       await detectAndLogin(page, creds, (msg) => console.log(`[ATTACK:${label}] ${msg}`));
       await new Promise(r => setTimeout(r, 2000));
       if (signal?.aborted) throw new Error('Scan aborted');
       
+      // Wait for subsequent requests to grab the token
+      for (let i = 0; i < 10; i++) {
+        if (capturedJwt || authType !== 'jwt') break;
+        await new Promise(r => setTimeout(r, 500));
+      }
+
+      if (authType === 'jwt') {
+        if (capturedJwt) {
+          console.log(`[ATTACK:${label}] Extracted JWT from requests: ${(capturedJwt as string).substring(0, 15)}...`);
+          return { token: capturedJwt as string, csrfToken: capturedCsrfToken };
+        }
+
+        const token = await page.evaluate(() => {
+          for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (key && /token|jwt|access_token|auth/i.test(key)) {
+              let val = localStorage.getItem(key);
+              if (val) {
+                if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1);
+                try {
+                  const parsed = JSON.parse(val);
+                  return parsed.token || parsed.accessToken || parsed.access_token || parsed.jwt || val;
+                } catch {
+                  return val;
+                }
+              }
+            }
+          }
+          return null;
+        });
+        if (token) {
+          console.log(`[ATTACK:${label}] Extracted JWT from localStorage: ${token.substring(0, 15)}...`);
+          return { token, csrfToken: capturedCsrfToken };
+        }
+      }
+      
       const cookies = await page.cookies();
-      if (cookies.length === 0) {
+      if (cookies.length === 0 && authType === 'cookie') {
          throw new LoginFailedError(`No cookies found after login for ${label}`);
       }
       const allCookies = cookies.map(c => `${c.name}=${c.value}`).join('; ');
-      return allCookies;
+      return { token: allCookies, csrfToken: capturedCsrfToken };
     })();
 
     return await Promise.race([sessionPromise, timeoutPromise]).finally(() => clearTimeout(timeoutId));
@@ -74,51 +155,6 @@ async function getPuppeteerSession(
       await browser.close().catch(() => {});
     }
   }
-}
-
-async function getJWTToken(
-  targetUrl: string,
-  creds: UserCredentials,
-  loginPath: string,
-  label: string,
-  signal?: AbortSignal
-): Promise<string> {
-  if (signal?.aborted) throw new Error('Scan aborted');
-  const baseUrl = targetUrl.replace(/\/+$/, '');
-  const endpointsToTry = [
-    loginPath,
-    '/api/auth/login',
-    '/api/login',
-    '/api/auth/signin',
-    '/auth/login'
-  ];
-
-  for (const endpoint of endpointsToTry) {
-    if (!endpoint) continue;
-    try {
-      console.log(`[ATTACK:${label}] Trying JWT login at ${endpoint}...`);
-      const res = await axios.post(`${baseUrl}${endpoint}`, {
-        email: creds.email,
-        password: creds.password,
-      }, { 
-        validateStatus: () => true,
-        httpAgent: safeHttpAgent,
-        httpsAgent: safeHttpsAgent,
-        signal,
-      });
-
-      if (res.status === 200) {
-        const data = res.data;
-        const token = data?.token || data?.accessToken || data?.access_token || data?.jwt || res.headers['authorization']?.replace(/Bearer /i, '');
-        if (token) {
-          console.log(`[ATTACK:${label}] JWT token obtained from ${endpoint}`);
-          return token;
-        }
-      }
-    } catch (e) {}
-  }
-  
-  throw new Error(`Failed to obtain JWT token for ${label} across known endpoints.`);
 }
 
 const SAFE_HEADERS = ['accept', 'accept-language', 'content-type', 'x-tenant-id', 'x-api-version', 'x-csrf-token', 'x-requested-with'];
@@ -137,6 +173,7 @@ async function fetchResource(
   url: string,
   authType: 'cookie' | 'jwt' | 'unknown',
   token: string,
+  csrfToken: string | null,
   originalHeaders: Record<string, string> = {},
   signal?: AbortSignal
 ): Promise<{ status: number; data: any }> {
@@ -149,7 +186,14 @@ async function fetchResource(
         headers['Cookie'] = token;
       }
     }
-    const res = await axios.get(url, {
+    if (csrfToken) {
+      headers['x-csrf-token'] = csrfToken;
+    }
+    
+    // Fix Node.js >=17 IPv6 localhost resolution failing against IPv4-only dockers
+    const safeUrl = url.includes('localhost') ? url.replace('localhost', '127.0.0.1') : url;
+
+    const res = await axios.get(safeUrl, {
       headers,
       validateStatus: () => true,
       timeout: 10000,
@@ -211,16 +255,17 @@ export async function runBOLAAttack(
   config: ScanConfig,
   endpoints: DiscoveredEndpoint[],
   authType: 'cookie' | 'jwt' | 'unknown',
-  emit: (...args: any[]) => void,
+  emit: (stage: string, type: string, message: string, payload?: any) => void,
+  capturedIds: Record<string, string>,
   signal?: AbortSignal
-): Promise<import('../types').BOLAResult> {
+): Promise<{ finding: BOLAFinding | null; reason: string; attackStats: any }> {
   const targetUrl = config.targetUrl.replace(/\/+$/, '');
 
   // Find parameterized GET endpoints (e.g., /api/records/REC-xxxxx, /api/users/123)
   // Don't require isAuthenticated — the interceptor can't see browser-managed cookies
   const candidates = endpoints.filter((ep) => {
-    if (ep.statusCode >= 400) return false;
-    
+    if (!ep.url.startsWith(targetUrl) && !ep.url.includes('localhost') && !ep.url.includes('127.0.0.1')) return false;
+
     // Check path segments
     const segments = ep.path.split('/').filter(Boolean);
     if (segments.some(seg => isResourceIdShaped(seg))) return true;
@@ -228,7 +273,9 @@ export async function runBOLAAttack(
     // Check query params
     try {
       const url = new URL(ep.url);
-      for (const [_, val] of url.searchParams.entries()) {
+      for (const [key, val] of url.searchParams.entries()) {
+        const ignoreParams = ['limit', 'offset', 'page', 'size', 'per_page', 'count'];
+        if (ignoreParams.includes(key.toLowerCase())) continue;
         if (isResourceIdShaped(val)) return true;
       }
     } catch {}
@@ -249,10 +296,39 @@ export async function runBOLAAttack(
     return false;
   });
 
+  const attackStats = {
+    replay: {
+      eligible: candidates.length,
+      tested: 0,
+      skipped: 0,
+    },
+    skipReasons: {
+      missingObjectId: 0,
+      authReplayFailed: 0,
+      noSecondUser: 0,
+      unsupportedRoute: 0,
+      parseFailure: 0,
+      other: 0,
+    },
+    confirmation: {
+      candidates: 0,
+      rejected: 0,
+      confirmed: 0,
+    },
+    rejectionReasons: {
+      returned403: 0,
+      returned404: 0,
+      responseMismatch: 0,
+      insufficientEvidence: 0,
+      diffSimilarityTooLow: 0,
+      other: 0,
+    },
+  };
+
   if (candidates.length === 0) {
     emit('[ATTACK] No parameterized endpoints discovered during crawl.');
     emit('⚠️ No parameterized API endpoints discovered. Try adding more pages to pagesToCrawl.');
-    return { finding: null, reason: 'no_candidates' };
+    return { finding: null, reason: 'no_candidates', attackStats };
   }
 
   // Sort candidates by score — best targets first
@@ -263,35 +339,31 @@ export async function runBOLAAttack(
 
   // Authenticate User A (victim) using config credentials
   let victimToken: string;
+  let victimCsrf: string | null = null;
   try {
     emit(`[ATTACK] Establishing User A session (${config.userA.email})...`);
-    if (authType === 'jwt') {
-      emit('[ATTACK] Fetching JWT token for victim session...');
-      victimToken = await getJWTToken(targetUrl, config.userA, config.loginPath || '', 'UserA', signal);
-    } else {
-      emit('[ATTACK] Opening browser session for victim...');
-      victimToken = await getPuppeteerSession(targetUrl, config.userA, config, 'UserA', signal);
-    }
+    emit('[ATTACK] Opening browser session for victim...');
+    const vSession = await getPuppeteerSession(targetUrl, config.userA, config, authType, 'UserA', signal);
+    victimToken = vSession.token;
+    victimCsrf = vSession.csrfToken;
     emit('[ATTACK] User A authenticated ✓');
   } catch (err: unknown) {
     const errorMessage = err instanceof Error ? err.message : String(err);
     emit(`[ATTACK] Failed to authenticate User A: ${errorMessage}`);
-    return { finding: null, reason: 'not_exploitable' };
+    return { finding: null, reason: 'not_exploitable', attackStats };
   }
 
   // Authenticate User B (attacker) — if the account doesn't exist, use unauthenticated access
   let attackerToken: string = '';
+  let attackerCsrf: string | null = null;
   let attackerAuthenticated = false;
   let attackerType: 'authenticated_attacker' | 'unauthenticated_probe' = 'unauthenticated_probe';
   try {
     emit(`[ATTACK] Establishing User B session (${config.userB.email})...`);
-    if (authType === 'jwt') {
-      emit('[ATTACK] Fetching JWT token for attacker session...');
-      attackerToken = await getJWTToken(targetUrl, config.userB, config.loginPath || '', 'UserB', signal);
-    } else {
-      emit('[ATTACK] Opening browser session for attacker...');
-      attackerToken = await getPuppeteerSession(targetUrl, config.userB, config, 'UserB', signal);
-    }
+    emit('[ATTACK] Opening browser session for attacker...');
+    const aSession = await getPuppeteerSession(targetUrl, config.userB, config, authType, 'UserB', signal);
+    attackerToken = aSession.token;
+    attackerCsrf = aSession.csrfToken;
     attackerAuthenticated = true;
     attackerType = 'authenticated_attacker';
     emit('[ATTACK] User B authenticated ✓');
@@ -300,6 +372,7 @@ export async function runBOLAAttack(
     emit(`[ATTACK] User B auth failed: ${errorMessage}`);
     emit('[ATTACK] Continuing with unauthenticated probe for public object exposure...');
     attackerToken = '';
+    attackerCsrf = null;
     attackerAuthenticated = false;
     attackerType = 'unauthenticated_probe';
   }
@@ -317,29 +390,59 @@ export async function runBOLAAttack(
 
   for (const endpoint of candidates) {
     if (signal?.aborted) throw new Error('Scan aborted');
-    const resourceUrl = `${targetUrl}${endpoint.path}`;
+    emit(`[ATTACK] capturedIds = ${JSON.stringify(capturedIds)}`);
+    const normPath = normalizePath(endpoint.path);
+    const realId = capturedIds[normPath] || capturedIds[`${normPath}/:id`];
+    
+    let finalPath = endpoint.path;
+    if (realId) {
+      finalPath = normPath.replace(':id', realId);
+    } else if (normPath.includes(':id')) {
+      finalPath = normPath.replace(':id', '1');
+    }
+    
+    const resourceUrl = `${targetUrl}${finalPath}`;
 
     // Progress: BEFORE testing
-    emit('attack', 'testing', `Testing ${endpoint.method} ${endpoint.path}`, {
-      endpoint: endpoint.path, method: endpoint.method, completed, total
+    emit('attack', 'testing', `Testing ${endpoint.method} ${finalPath}`, {
+      endpoint: finalPath, method: endpoint.method, completed, total
     });
 
-    emit(`[ATTACK] Testing endpoint: ${endpoint.method} ${endpoint.path}`);
+    emit(`[ATTACK] Testing endpoint: ${endpoint.method} ${finalPath}`);
     emit(`[ATTACK] Fetching resource as User A (owner)...`);
-    const victimRes = await fetchResource(resourceUrl, authType, victimToken, endpoint.requestHeaders, signal);
+    
+    const victimRes = await fetchResource(resourceUrl, authType, victimToken, victimCsrf, endpoint.requestHeaders, signal);
 
     if (victimRes.status !== 200) {
       emit(`[ATTACK] User A got ${victimRes.status}, skipping...`);
       completed++;
-      emit('attack', 'safe', `${endpoint.method} ${endpoint.path} — skipped (${victimRes.status})`, {
-        endpoint: endpoint.path, method: endpoint.method, completed, total
+      attackStats.replay.skipped++;
+      if (victimRes.status === 404) {
+        attackStats.skipReasons.other++;
+      } else {
+        attackStats.skipReasons.authReplayFailed++;
+      }
+      emit('attack', 'safe', `${endpoint.method} ${finalPath} — skipped (${victimRes.status})`, {
+        endpoint: finalPath, method: endpoint.method, completed, total
       });
       continue;
     }
 
     const userAResourceId = extractResourceId(victimRes.data);
+    if (!userAResourceId) {
+      attackStats.skipReasons.missingObjectId++;
+      attackStats.replay.skipped++;
+      completed++;
+      emit('attack', 'safe', `${endpoint.method} ${finalPath} — skipped (missing object ID)`, {
+        endpoint: finalPath, method: endpoint.method, completed, total
+      });
+      continue;
+    }
 
+    // Now we are actually testing User B
+    attackStats.replay.tested++;
     emit(`[ATTACK] User A → ${victimRes.status} OK (resource exists)`);
+
     
     if (attackerToken) {
       emit('[ATTACK] Switching to User B session...');
@@ -352,7 +455,8 @@ export async function runBOLAAttack(
       emit('[ATTACK] Replaying same request with NO authentication...');
     }
 
-    const attackerRes = await fetchResource(resourceUrl, authType, attackerToken, endpoint.requestHeaders, signal);
+    const attackerRes = await fetchResource(resourceUrl, authType, attackerToken, attackerCsrf, endpoint.requestHeaders, signal);
+    attackStats.confirmation.candidates++;
 
     if (attackerRes.status === 200 && attackerRes.data && typeof attackerRes.data === 'object') {
       const responseStr = JSON.stringify(attackerRes.data);
@@ -362,6 +466,8 @@ export async function runBOLAAttack(
         emit(`[ATTACK] User B got 200 OK but response contained denial text. Protected.`);
         any401or403 = true;
         completed++;
+        attackStats.confirmation.rejected++;
+        attackStats.rejectionReasons.returned403++;
         emit('attack', 'safe', `${endpoint.method} ${endpoint.path} — protected`, {
           endpoint: endpoint.path, method: endpoint.method, completed, total
         });
@@ -372,6 +478,8 @@ export async function runBOLAAttack(
         emit(`[ATTACK] User B got 200 OK but response was suspiciously short. Inconclusive.`);
         anyInconclusive = true;
         completed++;
+        attackStats.confirmation.rejected++;
+        attackStats.rejectionReasons.insufficientEvidence++;
         emit('attack', 'safe', `${endpoint.method} ${endpoint.path} — inconclusive`, {
           endpoint: endpoint.path, method: endpoint.method, completed, total
         });
@@ -390,12 +498,17 @@ export async function runBOLAAttack(
         const attackerDataStr = JSON.stringify(userBData);
         if (victimDataStr === attackerDataStr && victimDataStr.length > 50) {
           dataMatch = true;
+        } else if (victimDataStr.length > 0 && Math.abs(victimDataStr.length - attackerDataStr.length) / victimDataStr.length < 0.1) {
+          // Allow 10% variance in response size
+          dataMatch = true;
         }
       }
 
       if (!dataMatch) {
         emit(`[ATTACK] Data does not belong to User A, skipping false positive...`);
         completed++;
+        attackStats.confirmation.rejected++;
+        attackStats.rejectionReasons.responseMismatch++;
         emit('attack', 'safe', `${endpoint.method} ${endpoint.path} — no data match`, {
           endpoint: endpoint.path, method: endpoint.method, completed, total
         });
@@ -406,20 +519,32 @@ export async function runBOLAAttack(
       const sensitiveFields = detectSensitiveFields(attackerRes.data);
       const victimSensitiveFields = detectSensitiveFields(victimRes.data);
 
-      const hasVictimData = victimSensitiveFields.some(vf => 
-        JSON.stringify(attackerRes.data).includes(String(vf.value))
-      );
+      let hasVictimData = false;
+      if (victimSensitiveFields.length === 0) {
+        // If victim had no sensitive fields, only flag if we explicitly matched the victim's resource ID
+        hasVictimData = containsUserAResource;
+      } else {
+        hasVictimData = victimSensitiveFields.some(vf => 
+          JSON.stringify(attackerRes.data).includes(String(vf.value))
+        );
+        // Also allow if the attacker got exactly the same payload back
+        if (!hasVictimData && JSON.stringify(victimRes.data) === JSON.stringify(attackerRes.data)) {
+           hasVictimData = true;
+        }
+      }
 
       if (!hasVictimData) {
         emit(`[ATTACK] False positive detected: Attacker response does not contain victim's sensitive data.`);
         completed++;
+        attackStats.confirmation.rejected++;
+        attackStats.rejectionReasons.diffSimilarityTooLow++;
         emit('attack', 'safe', `${endpoint.method} ${endpoint.path} — false positive filtered`, {
           endpoint: endpoint.path, method: endpoint.method, completed, total
         });
         continue;
       }
 
-      if (sensitiveFields.length > 0) {
+      if (sensitiveFields.length > 0 || hasVictimData) {
         emit(`[ATTACK] ${attackerToken ? 'User B' : 'Unauthenticated'} → ${attackerRes.status} OK`);
 
         const partialFinding = {
@@ -457,9 +582,17 @@ export async function runBOLAAttack(
           : `curl ${resourceUrl}`;
 
         completed++;
+        attackStats.confirmation.confirmed++;
         emit('attack', 'vulnerable', `${endpoint.method} ${endpoint.path} — VULNERABLE`, {
           endpoint: endpoint.path, method: endpoint.method, completed, total
         });
+
+        // Add remaining untested endpoints to skipped to maintain funnel consistency
+        const remaining = candidates.length - attackStats.replay.tested - attackStats.replay.skipped;
+        if (remaining > 0) {
+          attackStats.replay.skipped += remaining;
+          attackStats.skipReasons.other += remaining;
+        }
 
         return {
           finding: {
@@ -478,10 +611,13 @@ export async function runBOLAAttack(
             dataExposed: analysis.dataExposed,
             exploitType,
           } as BOLAFinding & { exploitType: 'bola' | 'unauthenticated_access' },
-          reason: 'vulnerable'
+          reason: 'vulnerable',
+          attackStats
         };
       } else {
         anyNoSensitiveData = true;
+        attackStats.confirmation.rejected++;
+        attackStats.rejectionReasons.insufficientEvidence++;
         emit(`[ATTACK] ${attackerToken ? 'User B' : 'Unauthenticated'} → ${attackerRes.status} OK but no sensitive data detected.`);
         completed++;
         emit('attack', 'safe', `${endpoint.method} ${endpoint.path} — no sensitive data`, {
@@ -491,15 +627,23 @@ export async function runBOLAAttack(
     } else {
       if (attackerRes.status === 401 || attackerRes.status === 403) {
         any401or403 = true;
+        attackStats.confirmation.rejected++;
+        attackStats.rejectionReasons.returned403++;
         emit(`[ATTACK] ${attackerToken ? 'User B' : 'Unauthenticated'} → ${attackerRes.status} Authorization checks in place`);
       } else if (attackerRes.status === 0 || attackerRes.status >= 500) {
         anyInconclusive = true;
+        attackStats.confirmation.rejected++;
+        attackStats.rejectionReasons.other++;
         emit(`[ATTACK] ${attackerToken ? 'User B' : 'Unauthenticated'} → ${attackerRes.status} Network or server error — inconclusive`);
       } else if (attackerRes.status === 404) {
         anyInconclusive = true;
+        attackStats.confirmation.rejected++;
+        attackStats.rejectionReasons.returned404++;
         emit(`[ATTACK] ${attackerToken ? 'User B' : 'Unauthenticated'} → ${attackerRes.status} Endpoint not found — inconclusive`);
       } else {
         anyInconclusive = true;
+        attackStats.confirmation.rejected++;
+        attackStats.rejectionReasons.other++;
         emit(`[ATTACK] ${attackerToken ? 'User B' : 'Unauthenticated'} → ${attackerRes.status} Unexpected response — inconclusive`);
       }
       completed++;
@@ -513,15 +657,15 @@ export async function runBOLAAttack(
   
   if (anyInconclusive) {
     emit('⚠️ Some endpoints returned network, server, or missing-route errors. Result is inconclusive.');
-    return { finding: null, reason: 'inconclusive' };
+    return { finding: null, reason: 'inconclusive', attackStats };
   } else if (anyNoSensitiveData) {
     emit('✅ Endpoints found but no sensitive data exposed. App may be partially protected.');
-    return { finding: null, reason: 'blocked' };
+    return { finding: null, reason: 'blocked', attackStats };
   } else if (any401or403) {
     emit('✅ Authorization checks appear to be in place. All endpoints returned 401/403 for attacker session.');
-    return { finding: null, reason: 'not_exploitable' };
+    return { finding: null, reason: 'not_exploitable', attackStats };
   }
 
   emit('⚠️ No attacker responses were conclusive.');
-  return { finding: null, reason: 'not_exploitable' };
+  return { finding: null, reason: 'not_exploitable', attackStats };
 }

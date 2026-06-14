@@ -67,7 +67,35 @@ export interface BOLAFinding {
 
 export interface BOLAResult {
   finding: BOLAFinding | null;
-  reason: 'vulnerable' | 'no_candidates' | 'not_exploitable' | 'blocked' | 'inconclusive';
+  reason: 'vulnerable' | 'blocked' | 'not_exploitable' | 'inconclusive' | 'no_candidates';
+  attackStats?: {
+    replay: {
+      eligible: number | null;
+      tested: number | null;
+      skipped: number | null;
+    };
+    skipReasons: {
+      missingObjectId: number;
+      authReplayFailed: number;
+      noSecondUser: number;
+      unsupportedRoute: number;
+      parseFailure: number;
+      other: number;
+    };
+    confirmation: {
+      candidates: number | null;
+      rejected: number | null;
+      confirmed: number | null;
+    };
+    rejectionReasons: {
+      returned403: number;
+      returned404: number;
+      responseMismatch: number;
+      insufficientEvidence: number;
+      diffSimilarityTooLow: number;
+      other: number;
+    };
+  };
 }
 
 export interface PatchResult {
@@ -75,12 +103,14 @@ export interface PatchResult {
   patchedCode: string;
   displayPatch: string;
   filePath: string;
-  ownershipField: string;
-  authLibrary: string;
-  sessionAccessor: string;
+  ownershipField: string | null;
+  authLibrary: string | null;
+  sessionAccessor: string | null;
   reasoning: string[];
-  patchSource: 'github_ai' | 'response_ai' | 'deterministic';
-  patchValidated?: boolean;
+  patchSource: 'github_ai' | 'response_ai' | 'deterministic' | 'skipped';
+  patchValidated: boolean;
+  patchGenerationAttempted?: boolean;
+  patchGenerationSkippedReason?: string | null;
 }
 
 export interface ScanResult {
@@ -111,6 +141,7 @@ export interface SSEPayload {
   prUrl?: string;
   verificationResult?: 'blocked' | 'pending' | null;
   reason?: string;
+  summary?: ScanSummary;
   [key: string]: unknown;
 }
 
@@ -133,4 +164,63 @@ export interface CrawlResult {
   endpoints: DiscoveredEndpoint[];
   crawlDurationMs: number;
   error?: string;
+}
+
+export interface ScanSummary {
+  meta: {
+    scanId: string;
+    targetUrl: string;
+    status: 'success' | 'failure' | 'cancelled' | 'degraded';
+    startTime: number;
+    endTime: number;
+    durationMs: number;
+    scannerVersion: string;
+  };
+  
+  telemetry: {
+    discovery: {
+      pagesVisited: number | null;
+      totalEndpoints: number | null;
+      uniqueEndpoints: number | null;
+      parameterizedEndpoints: number | null;
+      bolaCandidates: number | null;
+    };
+    replay: {
+      eligible: number | null;
+      tested: number | null;
+      skipped: number | null;
+      skipReasons: Record<string, number>;
+    };
+    confirmation: {
+      candidates: number | null;
+      confirmed: number | null;
+      rejected: number | null;
+      rejectionReasons: Record<string, number>;
+    };
+    remediation: {
+      attempted: boolean | null;
+      generated: boolean | null;
+      skipped: boolean | null;
+      validated: boolean | null;
+      validationFailed: boolean | null;
+      codeContextConfidence: string | null;
+      patchSkippedReason: string | null;
+    };
+    github: {
+      repoProvided: boolean;
+      tokenProvided: boolean;
+      attempted: boolean | null;
+      created: boolean | null;
+      skipped: boolean | null;
+      prUrl: string | null;
+      prSkippedReason: string | null;
+    };
+  };
+
+  results: {
+    finding: BOLAFinding | null;
+    patch: PatchResult | null;
+    regressionTest: string | null;
+    prUrl: string | null;
+  };
 }
