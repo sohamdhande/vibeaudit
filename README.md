@@ -179,10 +179,3 @@ vibeaudit/
 
 <div align="center">
 
-### Built for [Beyond Tomorrow Summit 2026](https://beyondtomorrow.dev)
-
-**Cybersecurity + AI Track**
-
-*Because the best time to find a BOLA is before your users do.*
-
-</div>
