@@ -10,7 +10,7 @@ Automated BOLA/IDOR vulnerability detection, AI-powered patching, and GitHub PR 
 [![Next.js](https://img.shields.io/badge/Next.js-16-000000?logo=next.js&logoColor=white)](https://nextjs.org/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](https://docker.com/)
 [![AI Powered](https://img.shields.io/badge/AI-Powered-FF6B6B?logo=openai&logoColor=white)](#tech-stack)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-FSL--1.1--MIT-blue.svg)](LICENSE)
 
 </div>
 
