@@ -17,3 +17,7 @@ screenshots/
 .DS_Store
 *.js
 test-*.js
+
+# Benchmarks
+benchmarks/
+
